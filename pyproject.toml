@@ -1,0 +1,22 @@
+# pyproject.toml
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "myo-panel"
+version = "0.1.0"
+description = "Desktop control panel for the MYO armband"
+requires-python = ">=3.10"
+dependencies = [
+    "pyside6>=6.7",
+    "bleak>=0.22",
+    "pyqtgraph>=0.13",
+    "qasync>=0.27",
+]
+
+[project.scripts]                # adds a `myo-panel` command
+myo-panel = "myo_panel.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,20 @@
+# Virtual-envs
+.venv/
+env/
+# Byte-code
+__pycache__/
+*.py[cod]
+# Qt (PyInstaller, rcc) build artefacts
+*.qmlc
+*.rcc
+# Testing
+coverage.*
+.cache/
+# Packaging
+*.egg-info/
+dist/
+build/
+wheelhouse/
+# OS
+.DS_Store
+Thumbs.db
