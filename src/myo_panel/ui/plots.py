@@ -4,63 +4,66 @@ import pyqtgraph as pg, numpy as np
 
 SAMPLES = 500
 SIGNAL_RANGE = 150
+CHANNEL_NAMES = [f"EMG_{i}" for i in range(8)]
+
+class _Ring:
+    """Shared circular buffer so grid & composite read the same data."""
+    def __init__(self):
+        self.buf = np.zeros((8, SAMPLES), dtype=np.int16)
+        self.ptr = 0
+    def insert(self, frames: np.ndarray):         # frames (8, N)
+        n = frames.shape[1]; end = self.ptr + n
+        if end <= SAMPLES:
+            self.buf[:, self.ptr:end] = frames
+        else:
+            k = SAMPLES - self.ptr
+            self.buf[:, self.ptr:] = frames[:, :k]
+            self.buf[:, : end % SAMPLES] = frames[:, k:]
+        self.ptr = end % SAMPLES
 
 class EMGGrid(QWidget):
-    """2x4 grid of fast PyQtGraph plots that share the same ring buffer."""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._layout = QGridLayout(self)
-        self._layout.setSpacing(4)
-        self._buf = np.zeros((8, SAMPLES), dtype=np.int16)
-        self._ptr = 0
-        self._plots = []
-        self._x = np.arange(SAMPLES)        # ← cache once
-        self._dirty = [False]*8   
-
+    """2x4 grid, each with its own line, but sharing one ring buffer."""
+    def __init__(self, ring: _Ring, parent=None):
+        super().__init__(parent); self.ring = ring
+        self._layout = QGridLayout(self); self._layout.setSpacing(4)
+        self._plots, self._x = [], np.arange(SAMPLES)
         for row in range(4):
             for col in range(2):
-                ch = row * 2 + col
-                w = pg.PlotWidget(background="k")
-                # Disable graph wheel/drag, hide auto-range button
-                w.setMouseEnabled(False, False)
-                w.hideButtons()
-                # Set ranges here
+                ch = row*2 + col
+                w = pg.PlotWidget(background="k"); w.setMouseEnabled(False, False); w.hideButtons()
                 vb = w.getViewBox()
-                vb.setXRange(0, SAMPLES, padding=0)
-                vb.setYRange(-SIGNAL_RANGE, SIGNAL_RANGE, padding=0)
-                # Ensure autorange is off if you manually set ranges
+                vb.setXRange(0, SAMPLES, padding=0); vb.setYRange(-SIGNAL_RANGE, SIGNAL_RANGE, padding=0)
                 vb.disableAutoRange()
-
+                w.setTitle(CHANNEL_NAMES[ch], color='w', size='8pt')
                 line = w.plot(pen=pg.intColor(ch))
-                self._plots.append((w, line))
-                self._layout.addWidget(w, row, col)
-
-    def push_frames(self, frames: np.ndarray):
-        """frames shape = (8, N).  Vectorised circular write."""
-        n = frames.shape[1]
-        end = self._ptr + n
-        if end <= SAMPLES:
-            self._buf[:, self._ptr:end] = frames
-        else:                                # wrap-around once
-            k = SAMPLES - self._ptr
-            self._buf[:, self._ptr:] = frames[:, :k]
-            self._buf[:, : end % SAMPLES] = frames[:, k:]
-        self._ptr = end % SAMPLES
-        self._dirty[:] = [True]*8 
+                self._plots.append((ch, w, line)); self._layout.addWidget(w, row, col)
 
     def refresh(self):
-        x = np.arange(SAMPLES)
-        for ch, (w, ln) in enumerate(self._plots):
-            ln.setData(x, np.roll(self._buf[ch], -self._ptr),
-                       downsample=2, autoDownsample=True)
-        if not any(self._dirty):
-            return
-        for ch, (w, ln) in enumerate(self._plots):
-            if not self._dirty[ch]:
-                continue
-            # contiguous view without np.roll copy
-            y = (self._buf[ch] if self._ptr == 0
-                 else np.concatenate((self._buf[ch, self._ptr:],
-                                      self._buf[ch, :self._ptr])))
+        for ch, w, ln in self._plots:
+            y = (self.ring.buf[ch] if self.ring.ptr == 0
+                 else np.concatenate((self.ring.buf[ch, self.ring.ptr:],
+                                      self.ring.buf[ch, :self.ring.ptr])))
             ln.setData(self._x, y, downsample=4, autoDownsample=True)
-            self._dirty[ch] = False
+
+class EMGComposite(QWidget):
+    """Single plot with 8 coloured lines + toggleable legend."""
+    def __init__(self, ring: _Ring, parent=None):
+        super().__init__(parent); self.ring = ring
+        self._x = np.arange(SAMPLES)
+        self._pw = pg.PlotWidget(background="k"); self._pw.hideButtons()
+        self._pw.setMouseEnabled(False, False)
+        self._pw.getViewBox().setXRange(0, SAMPLES, padding=0)
+        self._pw.getViewBox().setYRange(-SIGNAL_RANGE, SIGNAL_RANGE, padding=0)
+        self._pw.addLegend()
+        self.lines = []
+        for ch in range(8):
+            ln = self._pw.plot(pen=pg.intColor(ch), name=CHANNEL_NAMES[ch])
+            self.lines.append(ln)
+        lay = QGridLayout(self); lay.addWidget(self._pw, 0, 0)
+
+    def refresh(self):
+        for ch, ln in enumerate(self.lines):
+            y = (self.ring.buf[ch] if self.ring.ptr == 0
+                 else np.concatenate((self.ring.buf[ch, self.ring.ptr:],
+                                      self.ring.buf[ch, :self.ring.ptr])))
+            ln.setData(self._x, y, downsample=4, autoDownsample=True)
