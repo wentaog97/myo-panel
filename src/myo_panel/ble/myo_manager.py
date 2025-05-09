@@ -56,6 +56,7 @@ class MyoManager:
 
     def disconnect_async(self) -> None:    fire_and_forget(self._disconnect())
     def vibrate_async(self, pat="medium"): fire_and_forget(self._vibrate(pat))
+    def deep_sleep_async(self):            fire_and_forget(self._deep_sleep())
     def refresh_battery_async(self) -> None:
         if self._connected:
             fire_and_forget(self._read_battery())
@@ -118,6 +119,16 @@ class MyoManager:
             C.VIB_CMDS.get(pattern, C.VIB_CMDS["medium"]),
             response=True,
         )
+
+    async def _deep_sleep(self):
+        if not self._connected:
+            return
+        try:
+            await self._client.write_gatt_char(
+                C.COMMAND_UUID, C.DEEP_SLEEP_CMD, response=True
+            )
+        finally:
+            await self._disconnect()
 
     # ── streaming helpers ────────────────────────────────────────────────
     async def _start_emg(self):

@@ -29,19 +29,20 @@ class MainWindow(QMainWindow):
         self.addToolBar(tb)
 
         self.scan_act   = tb.addAction("Scan")
-        self.conn_act   = tb.addAction("Connect")
         self.disc_act   = tb.addAction("Disconnect")
         self.reset_act  = tb.addAction("Turn Off")
         self.vib_act    = tb.addAction("Vibrate")
         tb.addSeparator()
         self.pause_act  = tb.addAction("Pause Stream")
+        self._paused = False   
 
         # connect toolbar actions to handlers
         self.scan_act.triggered.connect(self._scan_devices)
-        self.conn_act.triggered.connect(self._connect_selected)
-        self.disc_act.triggered.connect(lambda: self.myo.disconnect_async())
-        self.conn_act.setEnabled(False)        # nothing selected yet
-        self._selected_addr = None
+        self.disc_act.triggered.connect(self._disconnect)
+        self.reset_act.triggered.connect(self._turn_off)
+        self.vib_act.triggered.connect(lambda: self.myo.vibrate_async("medium"))
+        self.pause_act.triggered.connect(self._toggle_pause)
+        self.disc_act.setEnabled(False)      
 
         # Options pop-over
         opt_menu = QMenu(self)
@@ -79,7 +80,7 @@ class MainWindow(QMainWindow):
 
 
     def _refresh_plots(self):
-        if not self._frame_q:
+        if self._paused or not self._frame_q:
             return
         # process **latest** max 20 frames, drop older to keep UI snappy
         take = min(len(self._frame_q), 20)
@@ -90,8 +91,9 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ BLE hooks
     def on_emg(self, _bank, two_frames):
-        self._frame_q.append(two_frames[0])
-        self._frame_q.append(two_frames[1])
+        if not self._paused:
+            self._frame_q.append(two_frames[0])
+            self._frame_q.append(two_frames[1])
 
     def _query_battery(self):
         self.myo.refresh_battery_async()
@@ -113,36 +115,58 @@ class MainWindow(QMainWindow):
                 self.status_lbl.setText("No MYO found")
                 return
 
-            # compose list "Name (AA:BB…)" for the dialog
+            # build a QInputDialog instance so we can rename the OK button
+            from PySide6.QtWidgets import QInputDialog, QDialog
             items = [f"{d['name']}  ({d['address']})" for d in devs]
-            from PySide6.QtWidgets import QInputDialog
-            # ← call QInputDialog *directly* (we are back on GUI thread)
-            choice, ok = QInputDialog.getItem(
-                self, "Select MYO", "Devices:", items, 0, False)
-            if ok and choice:
-                idx = items.index(choice)
-                self._selected_addr = devs[idx]["address"]
-                self.status_lbl.setText(f"Selected {choice}")
-                self.conn_act.setEnabled(True)
-            else:
+            dlg = QInputDialog(self)
+            dlg.setWindowTitle("Select MYO")
+            dlg.setLabelText("Choose device:")
+            dlg.setComboBoxItems(items)
+            dlg.setOkButtonText("Connect")
+            dlg.setCancelButtonText("Cancel")
+
+            if dlg.exec() != QDialog.Accepted:
                 self.status_lbl.setText("Scan cancelled")
+                return
 
-        asyncio.create_task(_do())
+            choice = dlg.textValue()
+            idx = items.index(choice)
+            addr = devs[idx]["address"]
 
-    def _connect_selected(self):
-        if not self._selected_addr:
-            return
-        self.status_lbl.setText("Connecting…")
-
-        async def _do():
-            loop = asyncio.get_running_loop()
+            # --- connect in background ---
+            self.status_lbl.setText("Connecting…")
             try:
                 await loop.run_in_executor(
-                    None, lambda: self.myo.connect(self._selected_addr))
-                self.status_lbl.setText("Streaming")
+                    None, lambda: self.myo.connect(addr))
+                self.current_dev = devs[idx]["name"]
+                self.status_lbl.setText(f"Streaming from {self.current_dev}")
+                self.disc_act.setEnabled(True)
             except Exception as exc:
                 from PySide6.QtWidgets import QMessageBox
                 QMessageBox.critical(self, "Connect failed", str(exc))
                 self.status_lbl.setText("Disconnected")
 
         asyncio.create_task(_do())
+
+    # ------------------------------------------------------------------ manual disconnect
+    def _disconnect(self):
+        self.disc_act.setEnabled(False)
+        self.status_lbl.setText("Disconnecting…")
+        self.myo.disconnect_async()
+        # give Bleak a moment, then update label
+        QTimer.singleShot(300, lambda: self.status_lbl.setText("Disconnected"))
+
+    # ------------------------------------------------------------------ turn off (deep-sleep)
+    def _turn_off(self):
+        self.status_lbl.setText("Turning off…")
+        self.myo.deep_sleep_async()
+        self.disc_act.setEnabled(False)
+        QTimer.singleShot(600, lambda: self.status_lbl.setText("Disconnected"))
+
+    # ------------------------------------------------------------------ pause / resume plotting
+    def _toggle_pause(self):
+        self._paused = not self._paused
+        self.pause_act.setText("Resume Stream" if self._paused else "Pause Stream")
+        # clear backlog so we don’t dump a huge burst when resuming
+        if self._paused:
+            self._frame_q.clear()

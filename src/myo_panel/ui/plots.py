@@ -3,6 +3,7 @@ from PySide6.QtWidgets import QWidget, QGridLayout
 import pyqtgraph as pg, numpy as np
 
 SAMPLES = 500
+SIGNAL_RANGE = 150
 
 class EMGGrid(QWidget):
     """2x4 grid of fast PyQtGraph plots that share the same ring buffer."""
@@ -20,10 +21,13 @@ class EMGGrid(QWidget):
             for col in range(2):
                 ch = row * 2 + col
                 w = pg.PlotWidget(background="k")
+                # Disable graph wheel/drag, hide auto-range button
+                w.setMouseEnabled(False, False)
+                w.hideButtons()
                 # Set ranges here
                 vb = w.getViewBox()
                 vb.setXRange(0, SAMPLES, padding=0)
-                vb.setYRange(-128, 128, padding=0)
+                vb.setYRange(-SIGNAL_RANGE, SIGNAL_RANGE, padding=0)
                 # Ensure autorange is off if you manually set ranges
                 vb.disableAutoRange()
 
