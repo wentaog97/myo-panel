@@ -9,7 +9,7 @@ code removed, and with constants pulled in from *myo_constants.py*.
 
 from __future__ import annotations
 
-import asyncio, threading
+import asyncio, threading, time
 from typing import Callable, Dict, List, Optional
 
 from bleak import BleakClient, BleakScanner   # pip install bleak
@@ -33,13 +33,15 @@ class MyoManager:
         self,
         *,
         emg_handler: Optional[Callable[[int, List[List[int]]], None]] = None,
-        imu_handler: Optional[Callable[[List[float], List[int], List[int]], None]] = None,
+        imu_handler: Optional[Callable[[List[float], List[int], List[int], str], None]] = None,
     ) -> None:
         self._client: Optional[BleakClient] = None
         self._lock = asyncio.Lock()
         self._connected = False
         self._battery: Optional[int] = None
         self._sku = None
+        self._emg_mode = 3
+        self._imu_mode = 1
         self._fw = None
         self._last_error: Optional[str] = None
         self._emg_handler, self._imu_handler = emg_handler, imu_handler
@@ -51,6 +53,8 @@ class MyoManager:
 
     def connect(self, address: str, *, emg_mode: int = 3, imu_mode: int = 1) -> None:
         """Blocking connect & start streaming."""
+        self._emg_mode = emg_mode
+        self._imu_mode = imu_mode
         cmd = bytearray([0x01, 3, emg_mode, imu_mode, 0x00])
         run_async(self._connect(address, cmd))
 
@@ -136,9 +140,15 @@ class MyoManager:
         def make_handler(bank):
             def h(_, data: bytearray):
                 if len(data) == 16:
+                    # Use Unix time with nano precision
+                    ts = int(time.time() * 1000000)
+                    # For raw mode, keep the original bytes
+                    raw_hex = "".join(f"{b:02x}" for b in data)
+                    # For processed mode, decode the values
                     samples = [[int.from_bytes([b], "little", signed=True) for b in data[:8]],
-                               [int.from_bytes([b], "little", signed=True) for b in data[8:]]]
-                    if self._emg_handler: self._emg_handler(bank, samples)
+                             [int.from_bytes([b], "little", signed=True) for b in data[8:]]]
+                    if self._emg_handler: 
+                        self._emg_handler(bank, samples, ts, raw_hex)
             return h
         for i, uuid in enumerate(C.EMG_UUIDS):
             await self._client.start_notify(uuid, make_handler(i))
@@ -147,10 +157,14 @@ class MyoManager:
         if not (self._client and self._client.is_connected): return
         def h(_, d: bytearray):
             if len(d) == 20 and self._imu_handler:
+                # Use Unix time with nanosecond precision
+                ts = int(time.time() * 1000000)
                 q = [int.from_bytes(d[i:i+2], "little", signed=True) / 16384 for i in range(0, 8, 2)]
                 a = [int.from_bytes(d[i:i+2], "little", signed=True)          for i in range(8, 14, 2)]
                 g = [int.from_bytes(d[i:i+2], "little", signed=True)          for i in range(14, 20, 2)]
-                self._imu_handler(q, a, g)
+                # Pass the raw hex data to the callback
+                raw_hex = "".join(f"{b:02x}" for b in d)
+                self._imu_handler(q, a, g, ts, raw_hex)
         await self._client.start_notify(C.IMU_UUID, h)
 
     # ── misc reads ───────────────────────────────────────────────────────

@@ -29,10 +29,10 @@ class MainWindow(QMainWindow):
 
         self.scan_act  = tb.addAction("Scan")
         self.disc_act  = tb.addAction("Disconnect"); self.disc_act.setEnabled(False)
-        self.off_act   = tb.addAction("Turn Off")
+        self.off_act   = tb.addAction("Turn Off"); self.off_act.setEnabled(False)
 
         # Vibrate button (medium by default)
-        self.vib_act   = tb.addAction("Vibrate")
+        self.vib_act   = tb.addAction("Vibrate"); self.vib_act.setEnabled(False)
         tb.addSeparator()
         self.pause_act = tb.addAction("Pause Stream")
 
@@ -76,7 +76,7 @@ class MainWindow(QMainWindow):
         h.addWidget(self.grid_view, 2); h.addWidget(self.comp_view, 2)
 
         right = QVBoxLayout()
-        self.record_panel = RecordingPanel(); right.addWidget(self.record_panel)
+        self.record_panel = RecordingPanel(self.myo); right.addWidget(self.record_panel)
 
         # IMU cube
         self.imu = QQuickWidget()
@@ -102,6 +102,9 @@ class MainWindow(QMainWindow):
         self.vib_act.triggered .connect(lambda: self.myo.vibrate_async(self._vib_pattern))
         self.pause_act.triggered.connect(self._toggle_pause)
 
+        # ── connect IMU handler ───────────────────────────────────────
+        self.myo._imu_handler = self._on_imu
+
     # ───────────────────────────────────────────────────────────────────
     def _refresh_plots(self):
         if self._paused or not self._frame_q:
@@ -109,12 +112,26 @@ class MainWindow(QMainWindow):
         take = min(len(self._frame_q), 20)
         frames = [self._frame_q.pop() for _ in range(take)][::-1]   # preserve order
         self._ring.insert(np.array(frames).T)
+        for f in frames:
+            self.record_panel.push_frame(f)
         (self.grid_view if self.grid_view.isVisible() else self.comp_view).refresh()
 
     # ------------- BLE stream callback -------------------------------
     def on_emg(self, _bank, two_frames):
         if not self._paused:
             self._frame_q.append(two_frames[0]); self._frame_q.append(two_frames[1])
+
+    # ------------- IMU callback ------------------------------------
+    def _on_imu(self, quat, acc, gyro, timestamp=None, raw_hex=None):
+        """Handle IMU data for both visualization and recording."""
+        # Update 3D visualization
+        if quat is not None and hasattr(self.imu, 'rootObject'):
+            root = self.imu.rootObject()
+            if root:
+                root.setRotation(quat[0], quat[1], quat[2], quat[3])
+        
+        # Record IMU data
+        self.record_panel.push_imu(quat, acc, gyro, timestamp, raw_hex)
 
     # ------------- battery polling -----------------------------------
     def _query_battery(self):
@@ -145,7 +162,11 @@ class MainWindow(QMainWindow):
             self.status_lbl.setText("Connecting…")
             try:
                 await loop.run_in_executor(None, lambda: self.myo.connect(addr))
-                self.status_lbl.setText(f"Streaming from {name}"); self.disc_act.setEnabled(True)
+                self.status_lbl.setText(f"Streaming from {name}")
+                # enable controls now that we're connected
+                self.disc_act.setEnabled(True)
+                self.off_act.setEnabled(True)
+                self.vib_act.setEnabled(True)
             except Exception as exc:
                 from PySide6.QtWidgets import QMessageBox
                 QMessageBox.critical(self, "Connect failed", str(exc))
@@ -154,14 +175,21 @@ class MainWindow(QMainWindow):
 
     # ------------- manual disconnect ---------------------------------
     def _disconnect(self):
-        self.disc_act.setEnabled(False); self.status_lbl.setText("Disconnecting…")
+        # disable all controls when disconnected
+        self.disc_act.setEnabled(False)
+        self.off_act.setEnabled(False)
+        self.vib_act.setEnabled(False)
+        self.status_lbl.setText("Disconnecting…")
         self.myo.disconnect_async()
         QTimer.singleShot(300, lambda: self.status_lbl.setText("Disconnected"))
 
     # ------------- turn off (deep-sleep) ------------------------------
     def _turn_off(self):
         self.status_lbl.setText("Turning off…"); self.myo.deep_sleep_async()
+        # after deep sleep there's no MYO, so disable controls
         self.disc_act.setEnabled(False)
+        self.off_act.setEnabled(False)
+        self.vib_act.setEnabled(False)
         QTimer.singleShot(600, lambda: self.status_lbl.setText("Disconnected"))
 
     # ------------- pause / resume ------------------------------------
