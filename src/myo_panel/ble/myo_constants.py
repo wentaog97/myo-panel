@@ -34,15 +34,15 @@ CMD_USER_ACTION   = 0x0b  # Notify user that an action has been recognized
 
 # ── EMG modes ────────────────────────────────────────────────────────────
 EMG_MODE_NONE     = 0x00  # Do not send EMG data
-EMG_MODE_FILTERED = 0x01  # Send filtered EMG data
-EMG_MODE_RAW      = 0x02  # Send raw (unfiltered) EMG data
-EMG_MODE_ALL      = 0x03  # Send both filtered and raw EMG data
+EMG_MODE_SEND_EMG = 0x02  # Send filtered EMG data
+EMG_MODE_SEND_RAW = 0x03  # Send raw (unfiltered) EMG data
 
 # ── IMU modes ────────────────────────────────────────────────────────────
-IMU_MODE_NONE     = 0x00  # Do not send IMU data
-IMU_MODE_SEND_ALL = 0x01  # Send all IMU data (both raw and computed)
-IMU_MODE_RAW_ONLY = 0x02  # Send only raw IMU data
-IMU_MODE_ALL      = 0x03  # Send all IMU data at maximum frequency
+IMU_MODE_NONE        = 0x00  # Do not send IMU data or events
+IMU_MODE_SEND_DATA   = 0x01  # Send IMU data streams (accelerometer, gyroscope, and orientation)
+IMU_MODE_SEND_EVENTS = 0x02  # Send motion events detected by the IMU (e.g. taps)
+IMU_MODE_SEND_ALL    = 0x03  # Send both IMU data streams and motion events
+IMU_MODE_SEND_RAW    = 0x04  # Send raw IMU data streams
 
 # ── sleep modes ──────────────────────────────────────────────────────────
 SLEEP_MODE_NORMAL     = 0x00  # Normal sleep mode
@@ -55,7 +55,7 @@ VIBRATION_MEDIUM = 0x02  # Vibrate for a medium amount of time
 VIBRATION_LONG   = 0x03  # Vibrate for a long amount of time
 
 # ── command payloads ─────────────────────────────────────────────────────
-SET_MODE_CMD      = bytearray([CMD_SET_MODE, 3, EMG_MODE_ALL, IMU_MODE_ALL, 0x00])   # raw EMG + raw IMU
+SET_MODE_CMD      = bytearray([CMD_SET_MODE, 3, EMG_MODE_SEND_RAW, IMU_MODE_SEND_ALL, 0x00])   # raw EMG + all IMU
 NEVER_SLEEP_CMD   = bytearray([CMD_SET_SLEEP, 0x01, SLEEP_MODE_NEVER_SLEEP])         # silent keep‑alive
 VIB_CMDS = {
     "short":  bytearray([CMD_VIBRATE, 0x01, VIBRATION_SHORT]),

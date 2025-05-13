@@ -23,6 +23,12 @@ class MainWindow(QMainWindow):
         self._paused  = False
         self.setWindowTitle("Myo Panel")
 
+        # Initialize EMG and IMU modes
+        self._emg_mode = 3  # EMG_MODE_SEND_RAW
+        self._imu_mode = 1  # IMU_MODE_SEND_DATA
+        self.myo._emg_mode = self._emg_mode
+        self.myo._imu_mode = self._imu_mode
+
         # ── top toolbar ────────────────────────────────────────────────
         tb = QToolBar()
         self.addToolBar(tb)
@@ -53,6 +59,68 @@ class MainWindow(QMainWindow):
         def _set_vib(act):
             self._vib_pattern = act.text().lower()
         vib_group.triggered.connect(_set_vib)
+
+        #  EMG Mode sub-menu
+        emg_menu = opt_menu.addMenu("EMG Mode")
+        emg_group = QActionGroup(self); emg_group.setExclusive(True)
+        
+        act_emg_none = QAction("None (0x00)", self, checkable=True)
+        act_emg_send_emg = QAction("Filtered (0x02)", self, checkable=True)
+        act_emg_send_raw = QAction("Raw (0x03)", self, checkable=True); act_emg_send_raw.setChecked(True)
+        
+        for a in (act_emg_none, act_emg_send_emg, act_emg_send_raw):
+            emg_group.addAction(a); emg_menu.addAction(a)
+            
+        self._emg_mode = 3  # default to EMG_MODE_SEND_RAW
+        def _set_emg_mode(act):
+            mode_map = {"None (0x00)": 0, "Filtered (0x02)": 2, "Raw (0x03)": 3}
+            new_mode = mode_map[act.text()]
+            self._emg_mode = new_mode
+            self.myo._emg_mode = new_mode
+            # Apply the change immediately if connected
+            if self.myo.connected:
+                self.status_lbl.setText("Updating EMG mode...")
+                success = self.myo.update_modes(emg_mode=new_mode)
+                if success:
+                    QTimer.singleShot(300, self._update_mode_status)
+                else:
+                    QTimer.singleShot(300, lambda: self.status_lbl.setText("EMG mode update failed"))
+        emg_group.triggered.connect(_set_emg_mode)
+        
+        #  IMU Mode sub-menu
+        imu_menu = opt_menu.addMenu("IMU Mode")
+        imu_group = QActionGroup(self); imu_group.setExclusive(True)
+        
+        act_imu_none = QAction("None (0x00)", self, checkable=True)
+        act_imu_send_data = QAction("Data Streams (0x01)", self, checkable=True); act_imu_send_data.setChecked(True)
+        act_imu_send_events = QAction("Motion Events (0x02)", self, checkable=True)
+        act_imu_send_all = QAction("All Data & Events (0x03)", self, checkable=True)
+        act_imu_send_raw = QAction("Raw Data (0x04)", self, checkable=True)
+        
+        for a in (act_imu_none, act_imu_send_data, act_imu_send_events, act_imu_send_all, act_imu_send_raw):
+            imu_group.addAction(a); imu_menu.addAction(a)
+            
+        self._imu_mode = 1  # default to IMU_MODE_SEND_DATA
+        def _set_imu_mode(act):
+            mode_map = {
+                "None (0x00)": 0, 
+                "Data Streams (0x01)": 1, 
+                "Motion Events (0x02)": 2, 
+                "All Data & Events (0x03)": 3,
+                "Raw Data (0x04)": 4
+            }
+            new_mode = mode_map[act.text()]
+            self._imu_mode = new_mode
+            self.myo._imu_mode = new_mode
+            # Apply the change immediately if connected
+            if self.myo.connected:
+                self.status_lbl.setText("Updating IMU mode...")
+                success = self.myo.update_modes(imu_mode=new_mode)
+                if success:
+                    QTimer.singleShot(300, self._update_mode_status)
+                else:
+                    QTimer.singleShot(300, lambda: self.status_lbl.setText("IMU mode update failed"))
+        imu_group.triggered.connect(_set_imu_mode)
 
         #  View-mode sub-menu with radio items
         view_menu  = opt_menu.addMenu("View mode")
@@ -117,7 +185,10 @@ class MainWindow(QMainWindow):
     # ------------- BLE stream callback -------------------------------
     def on_emg(self, _bank, two_frames):
         if not self._paused:
-            self._frame_q.append(two_frames[0]); self._frame_q.append(two_frames[1])
+            # Append both frames for all EMG modes (1, 2, 3)
+            # EMG_MODE_NONE (0) is handled in main.py before this is called
+            self._frame_q.append(two_frames[0])
+            self._frame_q.append(two_frames[1])
 
     # ------------- IMU callback ------------------------------------
     def _on_imu(self, quat, acc, gyro, timestamp=None, raw_hex=None):
@@ -159,12 +230,15 @@ class MainWindow(QMainWindow):
             idx = items.index(dlg.textValue()); addr, name = devs[idx]["address"], devs[idx]["name"]
             self.status_lbl.setText("Connecting…")
             try:
-                await loop.run_in_executor(None, lambda: self.myo.connect(addr))
+                # Use the configured EMG and IMU modes
+                await loop.run_in_executor(None, lambda: self.myo.connect(addr, emg_mode=self._emg_mode, imu_mode=self._imu_mode))
                 self.status_lbl.setText(f"Streaming from {name}")
                 # enable controls now that we're connected
                 self.disc_act.setEnabled(True)
                 self.off_act.setEnabled(True)
                 self.vib_act.setEnabled(True)
+                # Update status with current modes
+                QTimer.singleShot(500, self._update_mode_status)
             except Exception as exc:
                 from PySide6.QtWidgets import QMessageBox
                 QMessageBox.critical(self, "Connect failed", str(exc))
@@ -199,3 +273,28 @@ class MainWindow(QMainWindow):
     # ------------- view switching ------------------------------------
     def _show_split(self, split: bool):
         self.grid_view.setVisible(split); self.comp_view.setVisible(not split)
+        
+    # ------------- mode status display -----------------------------
+    def _update_mode_status(self):
+        """Update the status bar with current EMG and IMU modes."""
+        if not self.myo.connected:
+            return
+            
+        emg_modes = {
+            0: "None",
+            2: "Filtered",
+            3: "Raw"
+        }
+        
+        imu_modes = {
+            0: "None",
+            1: "Data Streams",
+            2: "Motion Events",
+            3: "All Data & Events",
+            4: "Raw Data"
+        }
+        
+        emg_mode_text = emg_modes.get(self._emg_mode, f"Unknown ({self._emg_mode})")
+        imu_mode_text = imu_modes.get(self._imu_mode, f"Unknown ({self._imu_mode})")
+        
+        self.status_lbl.setText(f"Connected | EMG: {emg_mode_text} | IMU: {imu_mode_text}")

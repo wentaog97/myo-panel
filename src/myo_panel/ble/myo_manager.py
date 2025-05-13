@@ -58,6 +58,21 @@ class MyoManager:
         cmd = bytearray([0x01, 3, emg_mode, imu_mode, 0x00])
         run_async(self._connect(address, cmd))
 
+    def update_modes(self, emg_mode: int = None, imu_mode: int = None) -> None:
+        """Update EMG and IMU modes on a connected device."""
+        if not self._connected:
+            return False
+            
+        # Only update modes that are specified
+        if emg_mode is not None:
+            self._emg_mode = emg_mode
+        if imu_mode is not None:
+            self._imu_mode = imu_mode
+            
+        # Send command with updated modes
+        cmd = bytearray([0x01, 3, self._emg_mode, self._imu_mode, 0x00])
+        return run_async(self._update_modes(cmd))
+
     def disconnect_async(self) -> None:    fire_and_forget(self._disconnect())
     def vibrate_async(self, pat="medium"): fire_and_forget(self._vibrate(pat))
     def deep_sleep_async(self):            fire_and_forget(self._deep_sleep())
@@ -133,6 +148,39 @@ class MyoManager:
             )
         finally:
             await self._disconnect()
+            
+    async def _update_modes(self, cmd):
+        """Send a new command to update the EMG and IMU modes on an already connected device."""
+        if not self._connected:
+            return False
+        
+        try:
+            # Stop notifications to reset the streaming
+            try:
+                for uuid in C.EMG_UUIDS:
+                    await asyncio.wait_for(self._client.stop_notify(uuid), 1.0)  # 1s timeout
+                await asyncio.wait_for(self._client.stop_notify(C.IMU_UUID), 1.0)  # 1s timeout
+            except (asyncio.TimeoutError, Exception) as e:
+                print(f"[MyoManager] Warning: stop_notify timed out or failed: {e}")
+                # Continue anyway since we're going to reset the connection
+            
+            # Small delay to ensure notifications are completely stopped
+            await asyncio.sleep(0.2)
+            
+            # Send new command with updated modes
+            await self._client.write_gatt_char(C.COMMAND_UUID, cmd, response=True)
+            
+            # Small delay to ensure command is processed
+            await asyncio.sleep(0.2)
+            
+            # Restart streaming with new modes
+            await self._start_emg()
+            await self._start_imu()
+            print(f"[MyoManager] Updated modes: EMG={self._emg_mode}, IMU={self._imu_mode}")
+            return True
+        except Exception as exc:
+            print(f"[MyoManager] Failed to update modes: {exc}")
+            return False
 
     # ── streaming helpers ────────────────────────────────────────────────
     async def _start_emg(self):
@@ -142,12 +190,19 @@ class MyoManager:
                 if len(data) == 16:
                     # Use Unix time with nano precision
                     ts = int(time.time() * 1000000)
-                    # For raw mode, keep the original bytes
+                    # Always keep the original bytes for raw mode
                     raw_hex = "".join(f"{b:02x}" for b in data)
-                    # For processed mode, decode the values
-                    samples = [[int.from_bytes([b], "little", signed=True) for b in data[:8]],
-                             [int.from_bytes([b], "little", signed=True) for b in data[8:]]]
-                    if self._emg_handler: 
+                    
+                    # Process data based on EMG mode
+                    if self._emg_mode == C.EMG_MODE_NONE:
+                        samples = None  # No processing in NONE mode
+                    else:
+                        # For all other modes, decode the values
+                        # The difference is in what the device sends, not how we parse it
+                        samples = [[int.from_bytes([b], "little", signed=True) for b in data[:8]],
+                                  [int.from_bytes([b], "little", signed=True) for b in data[8:]]]
+                    
+                    if self._emg_handler:
                         self._emg_handler(bank, samples, ts, raw_hex)
             return h
         for i, uuid in enumerate(C.EMG_UUIDS):
