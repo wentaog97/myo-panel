@@ -159,14 +159,13 @@ class MyoManager:
             if len(d) == 20 and self._imu_handler:
                 # Use Unix time with nanosecond precision
                 ts = int(time.time() * 1000000)
-                q = [int.from_bytes(d[i:i+2], "little", signed=True) / 16384 for i in range(0, 8, 2)]
-                a = [int.from_bytes(d[i:i+2], "little", signed=True)          for i in range(8, 14, 2)]
-                g = [int.from_bytes(d[i:i+2], "little", signed=True)          for i in range(14, 20, 2)]
+                q = [int.from_bytes(d[i:i+2], "little", signed=True) / C.MYOHW_ORIENTATION_SCALE for i in range(0, 8, 2)]
+                a = [int.from_bytes(d[i:i+2], "little", signed=True) / C.MYOHW_ACCELEROMETER_SCALE for i in range(8, 14, 2)]
+                g = [int.from_bytes(d[i:i+2], "little", signed=True) / C.MYOHW_GYROSCOPE_SCALE for i in range(14, 20, 2)]
                 # Pass the raw hex data to the callback
                 raw_hex = "".join(f"{b:02x}" for b in d)
                 self._imu_handler(q, a, g, ts, raw_hex)
         await self._client.start_notify(C.IMU_UUID, h)
-
     # ── misc reads ───────────────────────────────────────────────────────
     async def _read_battery(self):
         try:
@@ -197,3 +196,4 @@ class MyoManager:
     def _on_ble_disconnect(self, _):
         if _bg_loop.is_running():
             _bg_loop.call_soon_threadsafe(lambda: asyncio.create_task(self._disconnect()))
+

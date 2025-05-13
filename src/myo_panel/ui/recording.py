@@ -1,3 +1,4 @@
+"""Recording panel for data collection."""
 from PySide6.QtWidgets import (
     QGroupBox, QVBoxLayout, QLabel, QLineEdit,
     QCheckBox, QPushButton, QSpinBox, QHBoxLayout,
@@ -15,10 +16,8 @@ class RecordingPanel(QGroupBox):
         v = QVBoxLayout(self)
 
         # buffer for CSV export and IMU samples
-        self._recording: list[dict] = []
-        self._emg_buffer = []
-        self._imu_buffer = []
-        self._last_imu = {
+        self._recording = []  # Main recording buffer
+        self._last_imu = {    # Cache the latest IMU data
             "quat": None,
             "acc": None,
             "gyro": None
@@ -93,8 +92,6 @@ class RecordingPanel(QGroupBox):
 
     def _start_recording(self):
         self._recording = []
-        self._emg_buffer = []
-        self._imu_buffer = []
         self._last_imu = {
             "quat": None,
             "acc": None,
@@ -112,70 +109,42 @@ class RecordingPanel(QGroupBox):
         """Called by the UI to record one EMG frame."""
         if not getattr(self, "_active", False):
             return
-        ts = timestamp or int(time.time() * 1000)
+        ts = timestamp or int(time.time() * 1000000)
         label = self.gesture_edit.text().strip() or "unlabeled"
 
-        # Store EMG frame with timestamp
-        if frame is not None:
-            self._emg_buffer.append({
+        if self.raw_chk.isChecked() and raw_hex:
+            # Store raw hex data
+            self._recording.append({
                 "timestamp": ts,
-                "emg": frame.copy(),
+                "type": "EMG",
+                "raw_hex": raw_hex,
                 "label": label
             })
-
-        # Process and store in main recording buffer
-        if self.format_combo.currentText().lower() == "csv":
-            if self.raw_chk.isChecked() and raw_hex:
-                # Use provided raw hex data
-                self._recording.append({
-                    "timestamp": ts,
-                    "type": "EMG",
-                    "raw_hex": raw_hex,
-                    "label": label
-                })
-            elif not self.raw_chk.isChecked() and frame is not None:
-                # Include latest IMU data with EMG frame
-                self._recording.append({
-                    "timestamp": ts,
-                    "emg": frame.copy(),
-                    "imu": self._last_imu.copy(),
-                    "label": label
-                })
-        else:
-            # Store raw data for pickle format
-            if frame is not None:
-                self._recording.append({
-                    "timestamp": ts,
-                    "emg": frame.copy(),
-                    "imu": self._last_imu.copy(),
-                    "label": label
-                })
+        elif frame is not None:
+            # Store processed data with current IMU state
+            self._recording.append({
+                "timestamp": ts,
+                "emg": frame.copy(),
+                "imu": self._last_imu.copy(),
+                "label": label
+            })
 
     def push_imu(self, quat, acc, gyro, timestamp=None, raw_hex=None):
         """Called by the UI to record one IMU sample."""
         if not getattr(self, "_active", False):
             return
-        ts = timestamp or int(time.time() * 1000)
+        ts = timestamp or int(time.time() * 1000000)
         label = self.gesture_edit.text().strip() or "unlabeled"
-        
-        # Update last IMU state - ensure we have lists/arrays
+
+        # Update last IMU state
         self._last_imu = {
             "quat": list(quat) if quat is not None else None,
             "acc": list(acc) if acc is not None else None,
             "gyro": list(gyro) if gyro is not None else None
         }
 
-        # Store IMU data with timestamp
-        self._imu_buffer.append({
-            "timestamp": ts,
-            "quat": list(quat) if quat is not None else None,
-            "acc": list(acc) if acc is not None else None,
-            "gyro": list(gyro) if gyro is not None else None,
-            "label": label
-        })
-
-        # Always record IMU data in raw hex mode if raw_hex is provided
-        if self.format_combo.currentText().lower() == "csv" and self.raw_chk.isChecked():
+        if self.raw_chk.isChecked() and raw_hex:
+            # Store raw hex data
             self._recording.append({
                 "timestamp": ts,
                 "type": "IMU",
@@ -210,7 +179,7 @@ class RecordingPanel(QGroupBox):
                     f.write(f"# Limb: {meta['limb']}\n")
                     f.write(f"# Side: {meta['side']}\n")
                     
-                    # Write device info - handle missing attributes gracefully
+                    # Write device info
                     if hasattr(self.myo, 'firmware') and self.myo.firmware is not None:
                         f.write(f"# Firmware: {self.myo.firmware}\n")
                     else:
@@ -221,14 +190,14 @@ class RecordingPanel(QGroupBox):
                     else:
                         f.write("# Model: unknown\n")
                         
-                    # Write EMG/IMU modes - these are internal attributes
+                    # Write EMG/IMU modes
                     f.write(f"# EMG Mode: {getattr(self.myo, '_emg_mode', 'unknown')}\n")
                     f.write(f"# IMU Mode: {getattr(self.myo, '_imu_mode', 'unknown')}\n")
 
-                    # Write data based on format
+                    writer = csv.writer(f)
                     if self.raw_chk.isChecked():
+                        # Write raw hex data
                         f.write("# Format: timestamp,type,raw_hex,label\n")
-                        writer = csv.writer(f)
                         writer.writerow(["timestamp", "type", "raw_hex", "label"])
                         for row in self._recording:
                             writer.writerow([
@@ -238,49 +207,42 @@ class RecordingPanel(QGroupBox):
                                 row["label"]
                             ])
                     else:
-                        f.write(
-                            "# Format: timestamp,"
-                            + ",".join(f"emg_{i}" for i in range(8))
-                            + ",quat_w,quat_x,quat_y,quat_z,"
-                              "acc_x,acc_y,acc_z,"
-                              "gyro_x,gyro_y,gyro_z,label\n"
+                        # Write processed data with EMG and IMU together
+                        f.write("# Format: timestamp," + 
+                               ",".join(f"emg_{i}" for i in range(8)) +
+                               ",quat_w,quat_x,quat_y,quat_z," +
+                               "acc_x,acc_y,acc_z," +
+                               "gyro_x,gyro_y,gyro_z,label\n")
+                        
+                        writer.writerow(
+                            ["timestamp"] +
+                            [f"emg_{i}" for i in range(8)] +
+                            ["quat_w", "quat_x", "quat_y", "quat_z"] +
+                            ["acc_x", "acc_y", "acc_z"] +
+                            ["gyro_x", "gyro_y", "gyro_z"] +
+                            ["label"]
                         )
-                        writer = csv.writer(f)
-                        headers = (
-                            ["timestamp"]
-                            + [f"emg_{i}" for i in range(8)]
-                            + ["quat_w", "quat_x", "quat_y", "quat_z"]
-                            + ["acc_x", "acc_y", "acc_z"]
-                            + ["gyro_x", "gyro_y", "gyro_z"]
-                            + ["label"]
-                        )
-                        writer.writerow(headers)
+
                         for row in self._recording:
                             if "raw_hex" not in row:  # Skip raw hex entries
                                 data = [row["timestamp"]]
                                 data.extend(row["emg"])
                                 
-                                # Handle IMU data carefully
-                                imu = row.get("imu", {})
-                                quat_data = imu.get("quat", None)
-                                acc_data = imu.get("acc", None)
-                                gyro_data = imu.get("gyro", None)
-                                
+                                # Add IMU data
+                                imu = row["imu"]
                                 # Add quaternion data
-                                if quat_data and len(quat_data) == 4:
-                                    data.extend(quat_data)
+                                if imu["quat"] and len(imu["quat"]) == 4:
+                                    data.extend(imu["quat"])
                                 else:
                                     data.extend([""]*4)
-                                    
                                 # Add accelerometer data
-                                if acc_data and len(acc_data) == 3:
-                                    data.extend(acc_data)
+                                if imu["acc"] and len(imu["acc"]) == 3:
+                                    data.extend(imu["acc"])
                                 else:
                                     data.extend([""]*3)
-                                    
                                 # Add gyroscope data
-                                if gyro_data and len(gyro_data) == 3:
-                                    data.extend(gyro_data)
+                                if imu["gyro"] and len(imu["gyro"]) == 3:
+                                    data.extend(imu["gyro"])
                                 else:
                                     data.extend([""]*3)
                                 
@@ -298,13 +260,10 @@ class RecordingPanel(QGroupBox):
                     })
                     pickle.dump({
                         "metadata": meta,
-                        "emg_data": self._emg_buffer,
-                        "imu_data": self._imu_buffer,
-                        "raw_recording": self._recording
+                        "recording": self._recording
                     }, f)
-            print(f"[Recorder] Saved {len(self._recording)} frames to {path}")
+            print(f"[Recorder] Saved {len([r for r in self._recording if 'raw_hex' not in r])} frames to {path}")
         except Exception as e:
             print("[Recorder] Save failed:", e)
-            # Print more detailed error info for debugging
             import traceback
             traceback.print_exc()

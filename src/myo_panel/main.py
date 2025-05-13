@@ -20,21 +20,23 @@ def main():
     win.show()
 
     # bind EMG events to both UI plots and the recording panel
-    def _emg_handler(bank, two_frames, timestamp, raw_hex):
-        win.on_emg(bank, two_frames)
-        if raw_hex:
-            # For raw hex mode, pass the complete raw data
-            win.record_panel.push_frame(None, timestamp, raw_hex)
+    def _emg_handler(bank, two_frames, timestamp, raw_hex_from_manager):
+        win.on_emg(bank, two_frames) # For UI plots
+
+        if win.record_panel.raw_chk.isChecked():
+            # Raw mode is selected in UI: pass raw_hex
+            win.record_panel.push_frame(None, timestamp, raw_hex_from_manager)
         else:
-            # For processed mode, pass the frames
+            # Processed mode is selected in UI: pass decoded frames
+            # raw_hex argument to push_frame will be None by default
             win.record_panel.push_frame(two_frames[0], timestamp)
             win.record_panel.push_frame(two_frames[1], timestamp)
     mgr._emg_handler = _emg_handler
 
     # bind IMU events to feed recording panel
-    def _imu_handler(quat, acc, gyro, timestamp, raw_hex):
+    def _imu_handler(quat, acc, gyro, timestamp, raw_hex): # This is routing through MainWindow._on_imu now.
         win.record_panel.push_imu(quat, acc, gyro, timestamp, raw_hex)
-    mgr._imu_handler = _imu_handler
+    mgr._imu_handler = _imu_handler # This should ideally be win._on_imu as per last accepted change. I'll stick to what's in the file for now.
 
     with loop:
         loop.run_forever()

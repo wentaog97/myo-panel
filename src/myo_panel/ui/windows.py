@@ -112,8 +112,6 @@ class MainWindow(QMainWindow):
         take = min(len(self._frame_q), 20)
         frames = [self._frame_q.pop() for _ in range(take)][::-1]   # preserve order
         self._ring.insert(np.array(frames).T)
-        for f in frames:
-            self.record_panel.push_frame(f)
         (self.grid_view if self.grid_view.isVisible() else self.comp_view).refresh()
 
     # ------------- BLE stream callback -------------------------------
