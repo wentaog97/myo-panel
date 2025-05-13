@@ -25,7 +25,9 @@ class RecordingPanel(QGroupBox):
 
         # Path field and browse button
         path_layout = QHBoxLayout()
-        self.path_edit = QLineEdit(placeholderText="Save path")
+        # Set default save path to workspace_root/output
+        default_save_path = os.path.join(os.getcwd(), "output") 
+        self.path_edit = QLineEdit(placeholderText="Save path", text=default_save_path)
         self.browse_btn = QPushButton("📁")
         self.browse_btn.setFixedWidth(30)
         path_layout.addWidget(self.path_edit)
@@ -76,9 +78,9 @@ class RecordingPanel(QGroupBox):
         self.free_btn.clicked.connect(self._toggle_free)
 
     def _choose_path(self):
-        file, _ = QFileDialog.getSaveFileName(self, "Save File", "", "All Files (*)")
-        if file:
-            self.path_edit.setText(file)
+        directory = QFileDialog.getExistingDirectory(self, "Select Save Directory", "")
+        if directory:
+            self.path_edit.setText(directory)
 
     def _start_timed(self):
         self._start_recording()
@@ -153,22 +155,41 @@ class RecordingPanel(QGroupBox):
             })
 
     def _save_file(self):
-        path = self.path_edit.text().strip()
-        if not path:
-            print("[Recorder] No path provided.")
+        directory = self.path_edit.text().strip()
+        if not directory:
+            print("[Recorder] No directory provided.")
             return
 
-        meta = {
-            "gesture": self.gesture_edit.text().strip(),
-            "limb": self.limb_edit.text().strip(),
-            "side": "left" if self.left_radio.isChecked() else "right",
-            "timestamp": datetime.datetime.now().isoformat(),
-            "format": self.format_combo.currentText().lower(),
-        }
+        # Construct filename
+        now = datetime.datetime.now()
+        datetime_str = now.strftime("%Y%m%d_%H%M%S")
+        
+        base_filename = f"myo_data_{datetime_str}"
+        
+        gesture = self.gesture_edit.text().strip()
+        if gesture:
+            base_filename += f"_{gesture.replace(' ', '_')}"
+            
+        limb = self.limb_edit.text().strip()
+        if limb:
+            base_filename += f"_{limb.replace(' ', '_')}"
+            
+        side = "left" if self.left_radio.isChecked() else "right"
+        base_filename += f"_{side}"
+        
+        ext = self.format_combo.currentText().lower()
+        filename = f"{base_filename}.{ext}"
+        
+        path = os.path.join(directory, filename)
 
-        ext = meta["format"]
-        if not path.lower().endswith(f".{ext}"):
-            path += f".{ext}"
+        meta = {
+            "gesture": gesture,
+            "limb": limb,
+            "side": side,
+            "timestamp": now.isoformat(),
+            "format": ext,
+            "filename": filename # Add constructed filename to meta
+        }
 
         try:
             if ext == "csv":
