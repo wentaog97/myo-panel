@@ -23,6 +23,7 @@ class MainWindow(QMainWindow):
         self._ring    = _Ring()
         self._paused  = False
         self._scanning = False  # Track scanning state
+        self._scan_connect_task = None # To store the reference to the scan/connect task
         self.setWindowTitle("Myo Panel")
 
         # Initialize EMG and IMU modes
@@ -383,6 +384,8 @@ class MainWindow(QMainWindow):
     def _scan_connect(self):
         # Prevent multiple scan operations
         if self._scanning:
+            # Optionally, if a task is already running, log or cancel it first
+            # For now, self._scanning flag handles this as before.
             return
         
         # Update scan button state
@@ -395,11 +398,11 @@ class MainWindow(QMainWindow):
                 loop = asyncio.get_running_loop()
                 devs = await loop.run_in_executor(None, self.myo.scan)
                 
-                # Reset scanning state if no devices found
+                # Check for cancellation after potentially long operation
+                await asyncio.sleep(0) # Allows task to be cancelled if requested
                 if not devs:
                     self.status_lbl.setText("No MYO found")
-                    self._scanning = False
-                    self.scan_act.setEnabled(True)
+                    # self._scanning and self.scan_act handled in finally
                     return
 
                 from PySide6.QtWidgets import QInputDialog, QDialog
@@ -411,17 +414,19 @@ class MainWindow(QMainWindow):
                 dlg.setOkButtonText("Connect")
                 dlg.setCancelButtonText("Cancel")
                 
-                # Reset scanning state if dialog is cancelled
+                # Check for cancellation before showing dialog
+                await asyncio.sleep(0)
                 if dlg.exec() != QDialog.Accepted:
                     self.status_lbl.setText("Scan cancelled")
-                    self._scanning = False
-                    self.scan_act.setEnabled(True)
+                    # self._scanning and self.scan_act handled in finally
                     return
 
                 idx = items.index(dlg.textValue())
                 addr, name = devs[idx]["address"], devs[idx]["name"]
                 self.status_lbl.setText("Connecting…")
                 
+                # Check for cancellation before connect
+                await asyncio.sleep(0)
                 try:
                     # Use the configured EMG and IMU modes
                     await loop.run_in_executor(None, lambda: self.myo.connect(addr, emg_mode=self._emg_mode, imu_mode=self._imu_mode))
@@ -435,25 +440,65 @@ class MainWindow(QMainWindow):
                     self.record_panel.timer_btn.setEnabled(True)
                     self.record_panel.free_btn.setEnabled(True)
                     
-                    # Keep Scan button disabled when connected
-                    self.scan_act.setEnabled(False)
-                    
-                    # Update status with current modes
+                    self.scan_act.setEnabled(False) # Keep Scan button disabled when connected
                     QTimer.singleShot(500, self._update_mode_status)
                 except Exception as exc:
-                    from PySide6.QtWidgets import QMessageBox
-                    QMessageBox.critical(self, "Connect failed", str(exc))
-                    self.status_lbl.setText("Disconnected")
-                    # Enable scan button on connection failure
-                    self._scanning = False
-                    self.scan_act.setEnabled(True)
+                    # Check for cancellation before showing message box or if Qt objects are gone
+                    await asyncio.sleep(0) 
+                    try:
+                        from PySide6.QtWidgets import QMessageBox
+                        QMessageBox.critical(self, "Connect failed", str(exc))
+                        self.status_lbl.setText("Disconnected")
+                        self.disc_act.setEnabled(False)
+                        self.off_act.setEnabled(False)
+                        self.vib_act.setEnabled(False)
+                        self.pause_act.setEnabled(False)
+                        if hasattr(self.record_panel, 'timer_btn'): 
+                            self.record_panel.timer_btn.setEnabled(False)
+                            self.record_panel.free_btn.setEnabled(False)
+                    except RuntimeError: # Handles cases where Qt objects are already deleted
+                        print("[MainWindow._do] RuntimeError accessing Qt objects in connect exception handler (expected if window is closing).")
+            except asyncio.CancelledError:
+                print("[MainWindow._do] Scan/connect task was cancelled.")
+                try:
+                    if hasattr(self, 'status_lbl'): # Check if status_lbl still exists
+                         self.status_lbl.setText("Operation Cancelled")
+                except RuntimeError:
+                    print("[MainWindow._do] RuntimeError setting status for cancellation (expected if window is closing).")
             finally:
-                # Only reset scanning state when not successfully connected
-                if not self.myo.connected:
-                    self._scanning = False
-                    self.scan_act.setEnabled(True)
+                # ---- Non-UI cleanup (MUST execute) ----
+                self._scanning = False # Always reset scanning flag
+                self._scan_connect_task = None # Clear the task reference
+
+                # ---- UI cleanup (CAN FAIL if window/widgets are gone) ----
+                try:
+                    # Ensure self.scan_act (QAction) exists before accessing it
+                    if hasattr(self, 'scan_act'):
+                        if not self.myo.connected: # Only re-enable scan if not connected
+                            self.scan_act.setEnabled(True)
+                        else: # If connected, scan should remain disabled
+                            self.scan_act.setEnabled(False)
+                    
+                    if hasattr(self, 'status_lbl'):
+                        # If connected and status was 'Operation Cancelled', _update_mode_status (if called) will fix it.
+                        # If not connected, and status isn't a final failure/cancel state, set to Disconnected.
+                        current_status = self.status_lbl.text()
+                        final_disconnected_states = ["Disconnected", "No MYO found", "Scan cancelled", "Operation Cancelled"]
+                        if not self.myo.connected and current_status not in final_disconnected_states:
+                             self.status_lbl.setText("Disconnected")
+
+                except RuntimeError: # Catch if Qt objects are deleted during finally
+                    print("[MainWindow._do] RuntimeError accessing Qt objects in finally block (expected if window is closing).")
                 
-        asyncio.create_task(_do())
+        # Before creating a new task, ensure any old one (if any) is handled or cancelled.
+        # Though self._scanning flag should prevent overlap for this specific function.
+        if self._scan_connect_task and not self._scan_connect_task.done():
+            print("[MainWindow] Warning: Previous scan/connect task still running. Cancelling it.")
+            self._scan_connect_task.cancel()
+            # It's complex to wait for it here, so we rely on the new task overwriting reference
+            # and the old task's finally block cleaning itself up.
+            
+        self._scan_connect_task = asyncio.create_task(_do())
 
     # ------------- manual disconnect ---------------------------------
     def _disconnect(self):
@@ -620,9 +665,24 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Handle application close."""
         print("MainWindow: closeEvent called.")
-        # The vision_recording widget (if it exists) will have its own closeEvent triggered by Qt.
-        # We ensure its CameraManager is stopped if the widget itself wasn't properly closed or GC'd.
-        if hasattr(self, "vision_recording") and self.vision_recording:
+
+        # Cancel the scan/connect task if it's running
+        if self._scan_connect_task and not self._scan_connect_task.done():
+            print("MainWindow: Cancelling active scan/connect task.")
+            self._scan_connect_task.cancel()
+            # We don't await it here as closeEvent is synchronous and we need it to proceed.
+            # The task should handle its cancellation and cleanup in its finally block.
+
+        # Initiate MyoManager shutdown. This is a blocking call with a timeout.
+        print("MainWindow: Initiating MyoManager shutdown...")
+        if self.myo:  # Ensure myo object exists
+            self.myo.shutdown(timeout=5.0) # Wait up to 5 seconds for Myo to clean up
+            print("MainWindow: MyoManager shutdown process completed or timed out.")
+        else:
+            print("MainWindow: MyoManager instance not found.")
+
+        # Clean up vision recording if it exists
+        if hasattr(self, 'vision_recording') and self.vision_recording:
             if hasattr(self.vision_recording, "camera_manager") and self.vision_recording.camera_manager.running:
                 print("MainWindow: Forcing camera_manager stop as a fallback.")
                 self.vision_recording.camera_manager.stop()

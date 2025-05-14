@@ -11,7 +11,7 @@ import numpy as np
 
 # Try importing camera manager, but handle potential import errors
 try:
-    from .camera_manager import CameraManager, MEDIAPIPE_AVAILABLE
+    from ..vision import CameraManager, MEDIAPIPE_AVAILABLE
     print("Successfully imported camera_manager module")
 except ImportError as e:
     print(f"Error importing camera_manager: {e}")

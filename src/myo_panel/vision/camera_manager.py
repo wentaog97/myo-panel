@@ -300,4 +300,7 @@ class CameraManager:
         # Release MediaPipe resources
         if MEDIAPIPE_AVAILABLE:
             if self.mp_hands:
-                self.mp_hands.close() 
+                self.mp_hands.close()
+            # self.mp_pose is no longer used actively, but ensure it's cleaned if ever set
+            if self.mp_pose: # Should ideally be None, but being safe
+                self.mp_pose.close()

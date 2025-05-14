@@ -70,6 +70,14 @@ MYO_HW_TYPE_MYO_WHITE  = 1  # White Myo
 MYO_HW_TYPE_MYO_BLACK  = 2  # Black Myo
 MYO_HW_TYPE_MYO_ALPHA  = 3  # Alpha (prototype) Myo
 
+# Model names mapping
+MYO_MODEL_NAMES = {
+    MYO_HW_TYPE_MYO_BLACK: "MYO Black",
+    MYO_HW_TYPE_MYO_WHITE: "MYO White",
+    MYO_HW_TYPE_MYO_ALPHA: "MYOD5",
+    0: "Unknown"
+}
+
 # ── packet sizes ─────────────────────────────────────────────────────────
 EMG_PACKET_SIZE = 16   # Size of EMG data packet (8 sensors × 2 bytes)
 IMU_PACKET_SIZE = 20   # Size of IMU data packet (10 values × 2 bytes)

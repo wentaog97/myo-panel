@@ -7,7 +7,7 @@ from .imu_viz import MatplotlibIMUCube
 
 # Camera imports are optional
 try:
-    from .camera_manager import CameraManager
+    from ..vision import CameraManager
     from .vision_recording import VisionRecordingWidget
     CV_AVAILABLE = True
 except ImportError:
