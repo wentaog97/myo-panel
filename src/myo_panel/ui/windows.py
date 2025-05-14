@@ -10,7 +10,7 @@ from collections import deque
 from .plots import _Ring, EMGGrid, EMGComposite
 from .recording import RecordingPanel
 from .imu_viz import MatplotlibIMUCube
-from .vision_recording import VisionRecordingWidget
+# Delay importing VisionRecordingWidget for better startup performance
 
 FRAME_UPDATE_INTERVAL   = 100   # ms
 BATTERY_CHECK_INTERVAL  = 5000  # ms
@@ -72,9 +72,10 @@ class MainWindow(QMainWindow):
         self.show_imu_act.setChecked(True)
         self.show_imu_act.triggered.connect(lambda checked: self._toggle_dock_visibility("imu", checked))
         
-        self.show_vision_act = QAction("Show Vision Based Recording", self, checkable=True)
+        self.show_vision_act = QAction("Show CV View", self, checkable=True)
         self.show_vision_act.setChecked(False)
-        self.show_vision_act.triggered.connect(lambda checked: self._toggle_dock_visibility("vision", checked))
+        # Connect to special handler that initializes the vision panel if needed
+        self.show_vision_act.triggered.connect(self._toggle_vision_view)
         
         view_menu.addAction(self.show_emg_act)
         view_menu.addAction(self.show_rec_act)
@@ -164,10 +165,65 @@ class MainWindow(QMainWindow):
                     QTimer.singleShot(300, lambda: self.status_lbl.setText("IMU mode update failed"))
         imu_group.triggered.connect(_set_imu_mode)
 
+        #  Camera Settings sub-menu
+        cam_menu = opt_menu.addMenu("Camera Settings")
+        cam_menu.setObjectName("cam_menu")  # Set object name for later lookup
+        
+        # Camera selection
+        cam_group = QActionGroup(self); cam_group.setExclusive(True)
+        # We'll populate this when cameras are detected
+        self.cam_actions = []
+        
+        # Default camera action is always available
+        act_cam_default = QAction("Default Camera", self, checkable=True)
+        act_cam_default.setChecked(True)
+        cam_group.addAction(act_cam_default)
+        cam_menu.addAction(act_cam_default)
+        self.cam_actions.append({"action": act_cam_default, "id": 0})
+        
+        # Set camera function
+        def _set_camera(act):
+            # Find the camera ID for this action
+            for cam in self.cam_actions:
+                if cam["action"] is act:
+                    # Set camera in vision recording widget if it exists
+                    if hasattr(self, "vision_recording") and self.vision_recording:
+                        self.vision_recording.camera_manager.set_camera(cam["id"])
+                    break
+        
+        cam_group.triggered.connect(_set_camera)
+        
+        # Resolution sub-menu
+        res_menu = cam_menu.addMenu("Resolution")
+        res_group = QActionGroup(self); res_group.setExclusive(True)
+        
+        act_res_low = QAction("Low (320x240)", self, checkable=True)
+        act_res_med = QAction("Medium (640x480)", self, checkable=True); act_res_med.setChecked(True)
+        act_res_high = QAction("High (1280x720)", self, checkable=True)
+        
+        for a in (act_res_low, act_res_med, act_res_high):
+            res_group.addAction(a); res_menu.addAction(a)
+        
+        # Set resolution function
+        def _set_resolution(act):
+            if hasattr(self, "vision_recording") and self.vision_recording:
+                if act is act_res_low:
+                    self.vision_recording.camera_manager.set_resolution(320, 240)
+                elif act is act_res_med:
+                    self.vision_recording.camera_manager.set_resolution(640, 480)
+                elif act is act_res_high:
+                    self.vision_recording.camera_manager.set_resolution(1280, 720)
+        
+        res_group.triggered.connect(_set_resolution)
+        
+        # Populate available cameras
+        self._populate_camera_menu(cam_menu, cam_group)
+
         opt_btn = QToolButton()
         opt_btn.setText("Options")
         opt_btn.setPopupMode(QToolButton.InstantPopup)
         opt_btn.setMenu(opt_menu)
+        opt_btn.setObjectName("opt_btn")  # Set object name for later lookup
         tb.addWidget(opt_btn)
 
         # Create dock widgets for movable and resizable components
@@ -212,29 +268,19 @@ class MainWindow(QMainWindow):
         # Only allow moving, no floating/popup
         self.imu_dock.setFeatures(QDockWidget.DockWidgetMovable)
         
-        # Vision Based Recording dock widget
-        self.vision_recording = VisionRecordingWidget()
-        
-        self.vision_dock = QDockWidget("Vision Based Recording", self)
-        self.vision_dock.setWidget(self.vision_recording)
-        self.vision_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-        # Only allow moving, no floating/popup
-        self.vision_dock.setFeatures(QDockWidget.DockWidgetMovable)
-        # Hide by default
-        self.vision_dock.setVisible(False)
+        # Vision Based Recording dock widget - lazy loaded
+        # Will be created on demand when needed
         
         # Add dock widgets to the main window
         self.addDockWidget(Qt.LeftDockWidgetArea, self.emg_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.recording_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.imu_dock)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.vision_dock)
         
         # Dictionary to track dock widgets by name
         self.dock_widgets = {
             "emg": self.emg_dock,
             "recording": self.recording_dock,
-            "imu": self.imu_dock,
-            "vision": self.vision_dock
+            "imu": self.imu_dock
         }
         
         # Enable dock nesting
@@ -271,6 +317,24 @@ class MainWindow(QMainWindow):
                 # Only set checked if making visible (one-way sync)
                 self.record_panel.enable_vision_chk.setChecked(True)
             
+    # ------------- toggle vision view ------------------------------
+    def _toggle_vision_view(self, checked):
+        """Toggle the visibility of the vision panel from the View menu."""
+        # Initialize the vision panel if needed and checked
+        if checked and "vision" not in self.dock_widgets:
+            if not self._init_vision_recording():
+                # Failed to initialize, uncheck the menu item
+                self.show_vision_act.setChecked(False)
+                return
+        
+        # Toggle visibility if the dock exists
+        if "vision" in self.dock_widgets:
+            self._toggle_dock_visibility("vision", checked)
+            
+            # If showing the panel, also check the enable vision checkbox
+            if checked:
+                self.record_panel.enable_vision_chk.setChecked(True)
+
     # ───────────────────────────────────────────────────────────────────
     def _refresh_plots(self):
         if self._paused or not self._frame_q:
@@ -474,14 +538,93 @@ class MainWindow(QMainWindow):
         
         self.status_lbl.setText(f"Connected | EMG: {emg_mode_text} | IMU: {imu_mode_text}")
 
+    # ------------- populate camera menu ----------------------------
+    def _populate_camera_menu(self, menu, group):
+        """Populate camera menu with available cameras."""
+        if not hasattr(self, "vision_recording") or not self.vision_recording:
+            return
+            
+        # Get available cameras
+        cameras = self.vision_recording.camera_manager.get_available_cameras()
+        
+        # Skip first camera (Default) as it's already added
+        for camera in cameras[1:]:
+            action = QAction(camera["name"], self, checkable=True)
+            group.addAction(action)
+            menu.addAction(action)
+            self.cam_actions.append({"action": action, "id": camera["id"]})
+    
+    # ------------- initialize Vision Recording widget -------------
+    def _init_vision_recording(self):
+        """Initialize the CV View widget if not already done."""
+        # Import the necessary modules only when needed
+        try:
+            print("Initializing CV View widget...")
+            from .vision_recording import VisionRecordingWidget
+            
+            # Create the Vision Recording widget
+            self.vision_recording = VisionRecordingWidget()
+            
+            self.vision_dock = QDockWidget("CV View", self)
+            self.vision_dock.setWidget(self.vision_recording)
+            self.vision_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+            # Only allow moving, no floating/popup
+            self.vision_dock.setFeatures(QDockWidget.DockWidgetMovable)
+            # Hide by default
+            self.vision_dock.setVisible(False)
+            
+            # Add dock widget to the main window
+            self.addDockWidget(Qt.RightDockWidgetArea, self.vision_dock)
+            
+            # Add to dictionary to track dock widgets
+            self.dock_widgets["vision"] = self.vision_dock
+            
+            print("CV View widget initialized successfully.")
+            return True
+        except ImportError as e:
+            print(f"Failed to initialize CV View - ImportError: {e}")
+            return False
+        except Exception as e:
+            print(f"Failed to initialize CV View - Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+
     # ------------- toggle vision feature ---------------------------
     def _toggle_vision_feature(self, state):
-        """Enable the vision recording feature when checkbox is checked.
+        """Enable the CV View when checkbox is checked.
         
         This is a one-way toggle - checking will show the panel, but
         unchecking will not hide it, to allow more flexibility.
         """
         if state == Qt.Checked:
+            # Initialize the Vision Recording widget if needed
+            if "vision" not in self.dock_widgets:
+                if not self._init_vision_recording():
+                    # Failed to initialize
+                    return
+                    
             # Only show the vision dock when checked, don't hide when unchecked
             self.vision_dock.setVisible(True)
             self.show_vision_act.setChecked(True)
+            
+            # Populate camera menu
+            opt_btn = self.findChild(QToolButton, "opt_btn")
+            if opt_btn and opt_btn.menu():
+                cam_menu = opt_btn.menu().findChild(QMenu, "cam_menu")
+                if cam_menu:
+                    cam_group = cam_menu.findChild(QActionGroup)
+                    if cam_group:
+                        self._populate_camera_menu(cam_menu, cam_group)
+
+    def closeEvent(self, event):
+        """Handle application close."""
+        print("MainWindow: closeEvent called.")
+        # The vision_recording widget (if it exists) will have its own closeEvent triggered by Qt.
+        # We ensure its CameraManager is stopped if the widget itself wasn't properly closed or GC'd.
+        if hasattr(self, "vision_recording") and self.vision_recording:
+            if hasattr(self.vision_recording, "camera_manager") and self.vision_recording.camera_manager.running:
+                print("MainWindow: Forcing camera_manager stop as a fallback.")
+                self.vision_recording.camera_manager.stop()
+        super().closeEvent(event)
+        print("MainWindow: closeEvent completed. Application should now exit if all non-daemon threads are done.")

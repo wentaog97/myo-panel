@@ -75,7 +75,7 @@ class RecordingPanel(QGroupBox):
         raw_group.addWidget(QLabel("Output Type"))
         types_layout = QHBoxLayout()
         self.raw_chk = QCheckBox("Raw hex output")
-        self.enable_vision_chk = QCheckBox("Enable Vision")
+        self.enable_vision_chk = QCheckBox("Enable CV")
         self.enable_vision_chk.setChecked(False)
         types_layout.addWidget(self.raw_chk)
         types_layout.addWidget(self.enable_vision_chk)
@@ -131,10 +131,24 @@ class RecordingPanel(QGroupBox):
         }
         self._active = True
         self.rec_indicator.setVisible(True)
+        
+        # Start vision recording if enabled
+        if self.enable_vision_chk.isChecked():
+            # Get the parent window to access vision recorder
+            parent = self.window()
+            if parent and hasattr(parent, "vision_recording") and parent.vision_recording:
+                parent.vision_recording._start_recording()
 
     def _stop_recording(self):
         self._active = False
         self.rec_indicator.setVisible(False)
+        
+        # Stop vision recording if it was started
+        parent = self.window()
+        if parent and hasattr(parent, "vision_recording") and parent.vision_recording:
+            if parent.vision_recording.recording:
+                parent.vision_recording._stop_recording()
+                
         self._save_file()
 
     def push_frame(self, frame: list[int], timestamp=None, raw_hex=None):
@@ -144,13 +158,21 @@ class RecordingPanel(QGroupBox):
         ts = timestamp or int(time.time() * 1000000)
         label = self.gesture_edit.text().strip() or "unlabeled"
 
+        # Get vision data if enabled
+        vision_data = None
+        if self.enable_vision_chk.isChecked():
+            parent = self.window()
+            if parent and hasattr(parent, "vision_recording") and parent.vision_recording:
+                vision_data = parent.vision_recording.get_latest_landmarks()
+
         if self.raw_chk.isChecked() and raw_hex:
             # Store raw hex data
             self._recording.append({
                 "timestamp": ts,
                 "type": "EMG",
                 "raw_hex": raw_hex,
-                "label": label
+                "label": label,
+                "vision": vision_data
             })
         elif frame is not None:
             # Store processed data with current IMU state
@@ -158,7 +180,8 @@ class RecordingPanel(QGroupBox):
                 "timestamp": ts,
                 "emg": frame.copy(),
                 "imu": self._last_imu.copy(),
-                "label": label
+                "label": label,
+                "vision": vision_data
             })
 
     def push_imu(self, quat, acc, gyro, timestamp=None, raw_hex=None):
@@ -263,7 +286,8 @@ class RecordingPanel(QGroupBox):
                                ",".join(f"emg_{i}" for i in range(8)) +
                                ",quat_w,quat_x,quat_y,quat_z," +
                                "acc_x,acc_y,acc_z," +
-                               "gyro_x,gyro_y,gyro_z,label\n")
+                               "gyro_x,gyro_y,gyro_z,label" +
+                               ",vision_data\n")
                         
                         writer.writerow(
                             ["timestamp"] +
@@ -271,7 +295,8 @@ class RecordingPanel(QGroupBox):
                             ["quat_w", "quat_x", "quat_y", "quat_z"] +
                             ["acc_x", "acc_y", "acc_z"] +
                             ["gyro_x", "gyro_y", "gyro_z"] +
-                            ["label"]
+                            ["label"] +
+                            ["vision_data"]
                         )
 
                         for row in self._recording:
@@ -298,6 +323,13 @@ class RecordingPanel(QGroupBox):
                                     data.extend([""]*3)
                                 
                                 data.append(row["label"])
+                                
+                                # Add vision data if available
+                                if row.get("vision"):
+                                    data.append("YES")  # Just indicate presence of vision data in CSV
+                                else:
+                                    data.append("")
+                                    
                                 writer.writerow(data)
             else:
                 # Save as pickle with all data
@@ -307,7 +339,8 @@ class RecordingPanel(QGroupBox):
                         "firmware": self.myo.firmware if hasattr(self.myo, 'firmware') else None,
                         "model": self.myo.model_name if hasattr(self.myo, 'model_name') else None,
                         "emg_mode": getattr(self.myo, '_emg_mode', None),
-                        "imu_mode": getattr(self.myo, '_imu_mode', None)
+                        "imu_mode": getattr(self.myo, '_imu_mode', None),
+                        "vision_enabled": self.enable_vision_chk.isChecked()
                     })
                     pickle.dump({
                         "metadata": meta,
