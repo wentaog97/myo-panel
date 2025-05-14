@@ -1,6 +1,7 @@
 # windows.py
 from PySide6.QtWidgets import (QMainWindow, QToolBar, QLabel, QStatusBar,
-                               QWidget, QHBoxLayout, QVBoxLayout, QMenu, QToolButton)
+                               QWidget, QHBoxLayout, QVBoxLayout, QMenu, QToolButton,
+                               QDockWidget)
 from PySide6.QtGui     import QAction, QActionGroup
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtQuickWidgets import QQuickWidget
@@ -21,6 +22,7 @@ class MainWindow(QMainWindow):
         self._frame_q = deque(maxlen=500)
         self._ring    = _Ring()
         self._paused  = False
+        self._scanning = False  # Track scanning state
         self.setWindowTitle("Myo Panel")
 
         # Initialize EMG and IMU modes
@@ -39,8 +41,43 @@ class MainWindow(QMainWindow):
 
         # Vibrate button (medium by default)
         self.vib_act   = tb.addAction("Vibrate"); self.vib_act.setEnabled(False)
-        tb.addSeparator()
-        self.pause_act = tb.addAction("Pause Stream")
+        self.pause_act = tb.addAction("Pause Stream"); self.pause_act.setEnabled(False)
+
+        # ----------------  View ▾ menu -----------------
+        view_btn = QToolButton()
+        view_btn.setText("View")
+        view_btn.setPopupMode(QToolButton.InstantPopup)
+        view_menu = QMenu(self)
+        
+        # EMG view mode options (moved from Options menu)
+        view_group = QActionGroup(self); view_group.setExclusive(True)
+        act_split  = QAction("Split channel view", self, checkable=True); act_split.setChecked(True)
+        act_comp   = QAction("Composite view", self, checkable=True)
+        for a in (act_split, act_comp):
+            view_group.addAction(a); view_menu.addAction(a)
+        view_group.triggered.connect(lambda a: self._show_split(a is act_split))
+        
+        view_menu.addSeparator()
+        
+        # Panel visibility toggles
+        self.show_emg_act = QAction("Show EMG Visualization", self, checkable=True)
+        self.show_emg_act.setChecked(True)
+        self.show_emg_act.triggered.connect(lambda checked: self._toggle_dock_visibility("emg", checked))
+        
+        self.show_rec_act = QAction("Show Data Collection", self, checkable=True)
+        self.show_rec_act.setChecked(True)
+        self.show_rec_act.triggered.connect(lambda checked: self._toggle_dock_visibility("recording", checked))
+        
+        self.show_imu_act = QAction("Show IMU Visualization", self, checkable=True)
+        self.show_imu_act.setChecked(True)
+        self.show_imu_act.triggered.connect(lambda checked: self._toggle_dock_visibility("imu", checked))
+        
+        view_menu.addAction(self.show_emg_act)
+        view_menu.addAction(self.show_rec_act)
+        view_menu.addAction(self.show_imu_act)
+        
+        view_btn.setMenu(view_menu)
+        tb.addWidget(view_btn)
 
         # ----------------  Options ▾ menu -----------------
         opt_menu = QMenu(self)
@@ -122,37 +159,67 @@ class MainWindow(QMainWindow):
                     QTimer.singleShot(300, lambda: self.status_lbl.setText("IMU mode update failed"))
         imu_group.triggered.connect(_set_imu_mode)
 
-        #  View-mode sub-menu with radio items
-        view_menu  = opt_menu.addMenu("View mode")
-        view_group = QActionGroup(self); view_group.setExclusive(True)
-        act_split  = QAction("Split channel view", self, checkable=True); act_split.setChecked(True)
-        act_comp   = QAction("Composite view",     self, checkable=True)
-        for a in (act_split, act_comp):
-            view_group.addAction(a); view_menu.addAction(a)
-        view_group.triggered.connect(lambda a: self._show_split(a is act_split))
-
         opt_btn = QToolButton()
         opt_btn.setText("Options")
         opt_btn.setPopupMode(QToolButton.InstantPopup)
         opt_btn.setMenu(opt_menu)
         tb.addWidget(opt_btn)
 
-        # ── central area: two plot widgets we toggle ──────────────────
-        central = QWidget(); h = QHBoxLayout(central)
+        # Create dock widgets for movable and resizable components
+        
+        # EMG Grid dock widget
         self.grid_view = EMGGrid(self._ring)
-        self.comp_view = EMGComposite(self._ring); self.comp_view.hide()
-        h.addWidget(self.grid_view, 2); h.addWidget(self.comp_view, 2)
-
-        right = QVBoxLayout()
-        self.record_panel = RecordingPanel(self.myo); right.addWidget(self.record_panel)
-
-        # IMU cube
+        self.comp_view = EMGComposite(self._ring)
+        self.comp_view.hide()
+        
+        emg_container = QWidget()
+        emg_layout = QHBoxLayout(emg_container)
+        emg_layout.addWidget(self.grid_view)
+        emg_layout.addWidget(self.comp_view)
+        
+        self.emg_dock = QDockWidget("EMG Visualization", self)
+        self.emg_dock.setWidget(emg_container)
+        self.emg_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+        # Only allow moving, no floating/popup
+        self.emg_dock.setFeatures(QDockWidget.DockWidgetMovable)
+        
+        # Recording panel dock widget - remove title as it's already in the GroupBox
+        self.record_panel = RecordingPanel(self.myo)
+        # Disable recording buttons initially since no device is connected
+        self.record_panel.timer_btn.setEnabled(False)
+        self.record_panel.free_btn.setEnabled(False)
+        
+        self.recording_dock = QDockWidget("Data Collection", self)  # Add title here now
+        self.recording_dock.setWidget(self.record_panel)
+        self.recording_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+        # Only allow moving, no floating/popup
+        self.recording_dock.setFeatures(QDockWidget.DockWidgetMovable)
+        
+        # IMU visualization dock widget
         self.imu = QQuickWidget()
         self.imu.setSource(QUrl.fromLocalFile("src/myo_panel/ui/qml/Cube.qml"))
         self.imu.setResizeMode(QQuickWidget.SizeRootObjectToView)
-        right.addWidget(self.imu, 1)
-
-        h.addLayout(right, 1); self.setCentralWidget(central)
+        
+        self.imu_dock = QDockWidget("IMU Visualization", self)
+        self.imu_dock.setWidget(self.imu)
+        self.imu_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+        # Only allow moving, no floating/popup
+        self.imu_dock.setFeatures(QDockWidget.DockWidgetMovable)
+        
+        # Add dock widgets to the main window
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.emg_dock)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.recording_dock)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.imu_dock)
+        
+        # Dictionary to track dock widgets by name
+        self.dock_widgets = {
+            "emg": self.emg_dock,
+            "recording": self.recording_dock,
+            "imu": self.imu_dock
+        }
+        
+        # Enable dock nesting
+        self.setDockNestingEnabled(True)
 
         # ── status bar ────────────────────────────────────────────────
         sb = QStatusBar(); self.setStatusBar(sb)
@@ -172,7 +239,13 @@ class MainWindow(QMainWindow):
 
         # ── connect IMU handler ───────────────────────────────────────
         self.myo._imu_handler = self._on_imu
-
+    
+    # ------------- dock widget visibility toggle ------------------
+    def _toggle_dock_visibility(self, dock_name, visible):
+        """Toggle the visibility of a dock widget."""
+        if dock_name in self.dock_widgets:
+            self.dock_widgets[dock_name].setVisible(visible)
+            
     # ───────────────────────────────────────────────────────────────────
     def _refresh_plots(self):
         if self._paused or not self._frame_q:
@@ -210,58 +283,126 @@ class MainWindow(QMainWindow):
 
     # ------------- scan + connect ------------------------------------
     def _scan_connect(self):
+        # Prevent multiple scan operations
+        if self._scanning:
+            return
+        
+        # Update scan button state
+        self._scanning = True
+        self.scan_act.setEnabled(False)
         self.status_lbl.setText("Scanning…")
+        
         async def _do():
-            loop = asyncio.get_running_loop()
-            devs = await loop.run_in_executor(None, self.myo.scan)
-            if not devs:
-                self.status_lbl.setText("No MYO found"); return
-
-            from PySide6.QtWidgets import QInputDialog, QDialog
-            items = [f"{d['name']} ({d['address']})" for d in devs]
-            dlg = QInputDialog(self)
-            dlg.setWindowTitle("Select MYO")
-            dlg.setLabelText("Select a Myo device:")
-            dlg.setComboBoxItems(items)
-            dlg.setOkButtonText("Connect")
-            dlg.setCancelButtonText("Cancel")
-            if dlg.exec() != QDialog.Accepted: self.status_lbl.setText("Scan cancelled"); return
-
-            idx = items.index(dlg.textValue()); addr, name = devs[idx]["address"], devs[idx]["name"]
-            self.status_lbl.setText("Connecting…")
             try:
-                # Use the configured EMG and IMU modes
-                await loop.run_in_executor(None, lambda: self.myo.connect(addr, emg_mode=self._emg_mode, imu_mode=self._imu_mode))
-                self.status_lbl.setText(f"Streaming from {name}")
-                # enable controls now that we're connected
-                self.disc_act.setEnabled(True)
-                self.off_act.setEnabled(True)
-                self.vib_act.setEnabled(True)
-                # Update status with current modes
-                QTimer.singleShot(500, self._update_mode_status)
-            except Exception as exc:
-                from PySide6.QtWidgets import QMessageBox
-                QMessageBox.critical(self, "Connect failed", str(exc))
-                self.status_lbl.setText("Disconnected")
+                loop = asyncio.get_running_loop()
+                devs = await loop.run_in_executor(None, self.myo.scan)
+                
+                # Reset scanning state if no devices found
+                if not devs:
+                    self.status_lbl.setText("No MYO found")
+                    self._scanning = False
+                    self.scan_act.setEnabled(True)
+                    return
+
+                from PySide6.QtWidgets import QInputDialog, QDialog
+                items = [f"{d['name']} ({d['address']})" for d in devs]
+                dlg = QInputDialog(self)
+                dlg.setWindowTitle("Select MYO")
+                dlg.setLabelText("Select a Myo device:")
+                dlg.setComboBoxItems(items)
+                dlg.setOkButtonText("Connect")
+                dlg.setCancelButtonText("Cancel")
+                
+                # Reset scanning state if dialog is cancelled
+                if dlg.exec() != QDialog.Accepted:
+                    self.status_lbl.setText("Scan cancelled")
+                    self._scanning = False
+                    self.scan_act.setEnabled(True)
+                    return
+
+                idx = items.index(dlg.textValue())
+                addr, name = devs[idx]["address"], devs[idx]["name"]
+                self.status_lbl.setText("Connecting…")
+                
+                try:
+                    # Use the configured EMG and IMU modes
+                    await loop.run_in_executor(None, lambda: self.myo.connect(addr, emg_mode=self._emg_mode, imu_mode=self._imu_mode))
+                    self.status_lbl.setText(f"Streaming from {name}")
+                    
+                    # Enable controls now that we're connected
+                    self.disc_act.setEnabled(True)
+                    self.off_act.setEnabled(True)
+                    self.vib_act.setEnabled(True)
+                    self.pause_act.setEnabled(True)
+                    self.record_panel.timer_btn.setEnabled(True)
+                    self.record_panel.free_btn.setEnabled(True)
+                    
+                    # Keep Scan button disabled when connected
+                    self.scan_act.setEnabled(False)
+                    
+                    # Update status with current modes
+                    QTimer.singleShot(500, self._update_mode_status)
+                except Exception as exc:
+                    from PySide6.QtWidgets import QMessageBox
+                    QMessageBox.critical(self, "Connect failed", str(exc))
+                    self.status_lbl.setText("Disconnected")
+                    # Enable scan button on connection failure
+                    self._scanning = False
+                    self.scan_act.setEnabled(True)
+            finally:
+                # Only reset scanning state when not successfully connected
+                if not self.myo.connected:
+                    self._scanning = False
+                    self.scan_act.setEnabled(True)
+                
         asyncio.create_task(_do())
 
     # ------------- manual disconnect ---------------------------------
     def _disconnect(self):
-        # disable all controls when disconnected
+        # Disable all controls when disconnected
         self.disc_act.setEnabled(False)
         self.off_act.setEnabled(False)
         self.vib_act.setEnabled(False)
+        self.pause_act.setEnabled(False)
+        self.record_panel.timer_btn.setEnabled(False)
+        self.record_panel.free_btn.setEnabled(False)
+        
+        # Reset pause state if active
+        if self._paused:
+            self._paused = False
+            self.pause_act.setText("Pause Stream")
+            
         self.status_lbl.setText("Disconnecting…")
         self.myo.disconnect_async()
+        
+        # Enable scan button again
+        self._scanning = False
+        self.scan_act.setEnabled(True)
+        
         QTimer.singleShot(300, lambda: self.status_lbl.setText("Disconnected"))
 
     # ------------- turn off (deep-sleep) ------------------------------
     def _turn_off(self):
-        self.status_lbl.setText("Turning off…"); self.myo.deep_sleep_async()
-        # after deep sleep there's no MYO, so disable controls
+        self.status_lbl.setText("Turning off…")
+        self.myo.deep_sleep_async()
+        
+        # After deep sleep there's no MYO, so disable controls
         self.disc_act.setEnabled(False)
         self.off_act.setEnabled(False)
         self.vib_act.setEnabled(False)
+        self.pause_act.setEnabled(False)
+        self.record_panel.timer_btn.setEnabled(False)
+        self.record_panel.free_btn.setEnabled(False)
+        
+        # Reset pause state if active
+        if self._paused:
+            self._paused = False
+            self.pause_act.setText("Pause Stream")
+        
+        # Enable scan button again
+        self._scanning = False
+        self.scan_act.setEnabled(True)
+            
         QTimer.singleShot(600, lambda: self.status_lbl.setText("Disconnected"))
 
     # ------------- pause / resume ------------------------------------

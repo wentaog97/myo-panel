@@ -35,6 +35,7 @@ def main():
             # raw_hex argument to push_frame will be None by default
             win.record_panel.push_frame(two_frames[0], timestamp)
             win.record_panel.push_frame(two_frames[1], timestamp)
+    
     mgr._emg_handler = _emg_handler
 
     # bind IMU events to feed recording panel
@@ -42,6 +43,7 @@ def main():
         # Only update 3D visualization if IMU mode is not NONE
         if mgr._imu_mode != 0:
             win._on_imu(quat, acc, gyro, timestamp, raw_hex)
+    
     mgr._imu_handler = _imu_handler
 
     with loop:

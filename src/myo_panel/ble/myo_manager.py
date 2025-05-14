@@ -184,7 +184,9 @@ class MyoManager:
 
     # ── streaming helpers ────────────────────────────────────────────────
     async def _start_emg(self):
-        if not (self._client and self._client.is_connected): return
+        if not (self._client and self._client.is_connected): 
+            return
+            
         def make_handler(bank):
             def h(_, data: bytearray):
                 if len(data) == 16:
@@ -199,12 +201,15 @@ class MyoManager:
                     else:
                         # For all other modes, decode the values
                         # The difference is in what the device sends, not how we parse it
-                        samples = [[int.from_bytes([b], "little", signed=True) for b in data[:8]],
-                                  [int.from_bytes([b], "little", signed=True) for b in data[8:]]]
+                        samples = [
+                            [int.from_bytes([b], "little", signed=True) for b in data[:8]],
+                            [int.from_bytes([b], "little", signed=True) for b in data[8:]]
+                        ]
                     
                     if self._emg_handler:
                         self._emg_handler(bank, samples, ts, raw_hex)
             return h
+            
         for i, uuid in enumerate(C.EMG_UUIDS):
             await self._client.start_notify(uuid, make_handler(i))
 

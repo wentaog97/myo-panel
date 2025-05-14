@@ -11,7 +11,7 @@ import numpy as np
 
 class RecordingPanel(QGroupBox):
     def __init__(self, myo_manager, parent=None):
-        super().__init__("Data Collection", parent)
+        super().__init__(parent)
         self.myo = myo_manager
         v = QVBoxLayout(self)
 
@@ -33,22 +33,49 @@ class RecordingPanel(QGroupBox):
         path_layout.addWidget(self.path_edit)
         path_layout.addWidget(self.browse_btn)
 
+        # Combine gesture, limb, and side into one line
+        gesture_layout = QHBoxLayout()
+        
+        gesture_group = QVBoxLayout()
+        gesture_group.addWidget(QLabel("Gesture"))
         self.gesture_edit = QLineEdit(placeholderText="e.g. fist")
+        gesture_group.addWidget(self.gesture_edit)
+        gesture_layout.addLayout(gesture_group)
+        
+        limb_group = QVBoxLayout()
+        limb_group.addWidget(QLabel("Limb"))
         self.limb_edit = QLineEdit(placeholderText="e.g. arm/leg")
+        limb_group.addWidget(self.limb_edit)
+        gesture_layout.addLayout(limb_group)
 
+        side_group_box = QVBoxLayout()
+        side_group_box.addWidget(QLabel("Side"))
         self.side_group = QButtonGroup()
-        self.left_radio = QRadioButton("Left"); self.right_radio = QRadioButton("Right")
+        side_radio_layout = QHBoxLayout()
+        self.left_radio = QRadioButton("Left")
+        self.right_radio = QRadioButton("Right")
         self.left_radio.setChecked(True)
-        side_layout = QHBoxLayout()
-        side_layout.addWidget(QLabel("Side:"))
-        side_layout.addWidget(self.left_radio)
-        side_layout.addWidget(self.right_radio)
+        side_radio_layout.addWidget(self.left_radio)
+        side_radio_layout.addWidget(self.right_radio)
         for r in (self.left_radio, self.right_radio): self.side_group.addButton(r)
+        side_group_box.addLayout(side_radio_layout)
+        gesture_layout.addLayout(side_group_box)
 
+        # Combine output format and raw hex checkbox into one line
+        output_layout = QHBoxLayout()
+        
+        format_group = QVBoxLayout()
+        format_group.addWidget(QLabel("Output Format"))
         self.format_combo = QComboBox()
         self.format_combo.addItems(["CSV", "PKL"])
-
+        format_group.addWidget(self.format_combo)
+        output_layout.addLayout(format_group)
+        
+        raw_group = QVBoxLayout()
+        raw_group.addWidget(QLabel("Output Type"))
         self.raw_chk = QCheckBox("Raw hex output")
+        raw_group.addWidget(self.raw_chk)
+        output_layout.addLayout(raw_group)
 
         # Buttons
         h = QHBoxLayout()
@@ -57,12 +84,10 @@ class RecordingPanel(QGroupBox):
         self.free_btn  = QPushButton("Free Record")
         for w in (self.timer_btn, self.timer_sec, self.free_btn): h.addWidget(w)
 
-        v.addWidget(QLabel("Save Path"));     v.addLayout(path_layout)
-        v.addWidget(QLabel("Gesture"));       v.addWidget(self.gesture_edit)
-        v.addWidget(QLabel("Limb"));          v.addWidget(self.limb_edit)
-        v.addLayout(side_layout)
-        v.addWidget(QLabel("Output Format")); v.addWidget(self.format_combo)
-        v.addWidget(self.raw_chk)
+        v.addWidget(QLabel("Save Path"))
+        v.addLayout(path_layout)
+        v.addLayout(gesture_layout)
+        v.addLayout(output_layout)
         v.addLayout(h)
 
         self.rec_indicator = QLabel("● Recording")
