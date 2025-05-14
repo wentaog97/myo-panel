@@ -73,8 +73,13 @@ class RecordingPanel(QGroupBox):
         
         raw_group = QVBoxLayout()
         raw_group.addWidget(QLabel("Output Type"))
+        types_layout = QHBoxLayout()
         self.raw_chk = QCheckBox("Raw hex output")
-        raw_group.addWidget(self.raw_chk)
+        self.enable_vision_chk = QCheckBox("Enable Vision")
+        self.enable_vision_chk.setChecked(False)
+        types_layout.addWidget(self.raw_chk)
+        types_layout.addWidget(self.enable_vision_chk)
+        raw_group.addLayout(types_layout)
         output_layout.addLayout(raw_group)
 
         # Buttons

@@ -10,6 +10,7 @@ from collections import deque
 from .plots import _Ring, EMGGrid, EMGComposite
 from .recording import RecordingPanel
 from .imu_viz import MatplotlibIMUCube
+from .vision_recording import VisionRecordingWidget
 
 FRAME_UPDATE_INTERVAL   = 100   # ms
 BATTERY_CHECK_INTERVAL  = 5000  # ms
@@ -71,9 +72,14 @@ class MainWindow(QMainWindow):
         self.show_imu_act.setChecked(True)
         self.show_imu_act.triggered.connect(lambda checked: self._toggle_dock_visibility("imu", checked))
         
+        self.show_vision_act = QAction("Show Vision Based Recording", self, checkable=True)
+        self.show_vision_act.setChecked(False)
+        self.show_vision_act.triggered.connect(lambda checked: self._toggle_dock_visibility("vision", checked))
+        
         view_menu.addAction(self.show_emg_act)
         view_menu.addAction(self.show_rec_act)
         view_menu.addAction(self.show_imu_act)
+        view_menu.addAction(self.show_vision_act)
         
         view_btn.setMenu(view_menu)
         tb.addWidget(view_btn)
@@ -188,6 +194,9 @@ class MainWindow(QMainWindow):
         self.record_panel.timer_btn.setEnabled(False)
         self.record_panel.free_btn.setEnabled(False)
         
+        # Connect the Enable Vision checkbox
+        self.record_panel.enable_vision_chk.stateChanged.connect(self._toggle_vision_feature)
+        
         self.recording_dock = QDockWidget("Data Collection", self)  # Add title here now
         self.recording_dock.setWidget(self.record_panel)
         self.recording_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
@@ -203,16 +212,29 @@ class MainWindow(QMainWindow):
         # Only allow moving, no floating/popup
         self.imu_dock.setFeatures(QDockWidget.DockWidgetMovable)
         
+        # Vision Based Recording dock widget
+        self.vision_recording = VisionRecordingWidget()
+        
+        self.vision_dock = QDockWidget("Vision Based Recording", self)
+        self.vision_dock.setWidget(self.vision_recording)
+        self.vision_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+        # Only allow moving, no floating/popup
+        self.vision_dock.setFeatures(QDockWidget.DockWidgetMovable)
+        # Hide by default
+        self.vision_dock.setVisible(False)
+        
         # Add dock widgets to the main window
         self.addDockWidget(Qt.LeftDockWidgetArea, self.emg_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.recording_dock)
         self.addDockWidget(Qt.RightDockWidgetArea, self.imu_dock)
+        self.addDockWidget(Qt.RightDockWidgetArea, self.vision_dock)
         
         # Dictionary to track dock widgets by name
         self.dock_widgets = {
             "emg": self.emg_dock,
             "recording": self.recording_dock,
-            "imu": self.imu_dock
+            "imu": self.imu_dock,
+            "vision": self.vision_dock
         }
         
         # Enable dock nesting
@@ -242,6 +264,12 @@ class MainWindow(QMainWindow):
         """Toggle the visibility of a dock widget."""
         if dock_name in self.dock_widgets:
             self.dock_widgets[dock_name].setVisible(visible)
+            
+            # If we're changing the vision dock visibility, sync the checkbox state
+            if dock_name == "vision" and visible:
+                # Sync the checkbox in recording panel with the vision dock visibility
+                # Only set checked if making visible (one-way sync)
+                self.record_panel.enable_vision_chk.setChecked(True)
             
     # ───────────────────────────────────────────────────────────────────
     def _refresh_plots(self):
@@ -445,3 +473,15 @@ class MainWindow(QMainWindow):
         imu_mode_text = imu_modes.get(self._imu_mode, f"Unknown ({self._imu_mode})")
         
         self.status_lbl.setText(f"Connected | EMG: {emg_mode_text} | IMU: {imu_mode_text}")
+
+    # ------------- toggle vision feature ---------------------------
+    def _toggle_vision_feature(self, state):
+        """Enable the vision recording feature when checkbox is checked.
+        
+        This is a one-way toggle - checking will show the panel, but
+        unchecking will not hide it, to allow more flexibility.
+        """
+        if state == Qt.Checked:
+            # Only show the vision dock when checked, don't hide when unchecked
+            self.vision_dock.setVisible(True)
+            self.show_vision_act.setChecked(True)
