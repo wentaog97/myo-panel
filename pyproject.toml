@@ -13,6 +13,7 @@ dependencies = [
     "bleak>=0.22",
     "pyqtgraph>=0.13",
     "qasync>=0.27",
+    "matplotlib>=3.7.0",
 ]
 
 [project.scripts]                # adds a `myo-panel` command

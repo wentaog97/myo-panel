@@ -4,13 +4,12 @@ from PySide6.QtWidgets import (QMainWindow, QToolBar, QLabel, QStatusBar,
                                QDockWidget)
 from PySide6.QtGui     import QAction, QActionGroup
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtQuickWidgets import QQuickWidget
-from PySide6.QtCore import QUrl
 import asyncio, numpy as np
 from collections import deque
 
 from .plots import _Ring, EMGGrid, EMGComposite
 from .recording import RecordingPanel
+from .imu_viz import MatplotlibIMUCube
 
 FRAME_UPDATE_INTERVAL   = 100   # ms
 BATTERY_CHECK_INTERVAL  = 5000  # ms
@@ -195,10 +194,8 @@ class MainWindow(QMainWindow):
         # Only allow moving, no floating/popup
         self.recording_dock.setFeatures(QDockWidget.DockWidgetMovable)
         
-        # IMU visualization dock widget
-        self.imu = QQuickWidget()
-        self.imu.setSource(QUrl.fromLocalFile("src/myo_panel/ui/qml/Cube.qml"))
-        self.imu.setResizeMode(QQuickWidget.SizeRootObjectToView)
+        # IMU visualization dock widget - using matplotlib-based cube
+        self.imu = MatplotlibIMUCube()
         
         self.imu_dock = QDockWidget("IMU Visualization", self)
         self.imu_dock.setWidget(self.imu)
@@ -266,11 +263,20 @@ class MainWindow(QMainWindow):
     # ------------- IMU callback ------------------------------------
     def _on_imu(self, quat, acc, gyro, timestamp=None, raw_hex=None):
         """Handle IMU data for both visualization and recording."""
-        # Update 3D visualization
-        if quat is not None and hasattr(self.imu, 'rootObject'):
-            root = self.imu.rootObject()
-            if root:
-                root.setRotation(quat[0], quat[1], quat[2], quat[3])
+        # Debug output - print IMU data periodically
+        if getattr(self, "_imu_debug_counter", 0) % 100 == 0:  # Every 100 readings
+            print(f"IMU data: quat={quat}, gyro={gyro}")
+        
+        # Increment debug counter
+        self._imu_debug_counter = getattr(self, "_imu_debug_counter", 0) + 1
+        
+        # Update 3D visualization using either quaternion or gyro data
+        # But only update if the IMU widget is visible (save CPU when not needed)
+        if self.imu_dock.isVisible():
+            if quat is not None:
+                self.imu.update_quaternion(quat)
+            elif gyro is not None:
+                self.imu.update_gyro(gyro)
         
         # Record IMU data
         self.record_panel.push_imu(quat, acc, gyro, timestamp, raw_hex)
