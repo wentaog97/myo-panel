@@ -38,20 +38,22 @@ def fire_and_forget(coro):    # schedule without awaiting
 def stop_bg_loop():
     """Stop the background event loop and clean up resources."""
     if _bg_loop.is_running():
+        print("[MyoManager] Forcefully stopping background loop...")
+        
         # Cancel all running tasks
         for task in asyncio.all_tasks(_bg_loop):
-            task.cancel()
+            if not task.done():
+                task.cancel()
         
-        # Schedule loop stop
-        asyncio.run_coroutine_threadsafe(_bg_loop.shutdown_asyncgens(), _bg_loop)
+        # Stop the loop directly
         _bg_loop.call_soon_threadsafe(_bg_loop.stop)
         
-        # Give it a little time to clean up
-        timeout = 3.0  # seconds
+        # Give it a short time to stop
+        timeout = 1.0  # shorter timeout - we're being forceful
         start_time = time.time()
         while _bg_loop.is_running() and (time.time() - start_time) < timeout:
             time.sleep(0.1)
-            
+        
         print("[MyoManager] Background loop stopped.")
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -134,34 +136,45 @@ class MyoManager:
         if self._connected:
             fire_and_forget(self._read_battery())
 
-    def shutdown(self, timeout: float = 5.0) -> None:
+    def shutdown(self, timeout: float = 3.0) -> None:
         """Initiates shutdown of the MyoManager, attempting a graceful disconnect."""
         print("[MyoManager] Shutdown initiated.")
+        
+        # Already shutting down - avoid duplicate calls
+        if self._shutting_down:
+            print("[MyoManager] Already in shutdown process.")
+            return
+            
+        # Set state first to prevent new operations
         self._shutting_down = True
         
-        # Cancel any outstanding operations
+        # 1. Cancel any in-progress background tasks immediately
         for task in asyncio.all_tasks(_bg_loop):
             if not task.done() and task != asyncio.current_task(_bg_loop):
                 task.cancel()
         
-        # Stop new operations from starting
-        # Try to disconnect if a client exists or might be connecting
-        try:
-            # We run _disconnect which is async. run_async will block until it's done or timeout.
-            # Use silent=True to avoid callbacks during shutdown
-            run_async(self._disconnect(silent=True), timeout=timeout/2)  # Use half the timeout for disconnect
-            print("[MyoManager] Disconnect attempt in shutdown finished or timed out.")
-        except Exception as e:
-            # This includes timeout from future.result(timeout) in run_async
-            # Using repr(e) or type(e).__name__ for better timeout error logging
-            print(f"[MyoManager] Error/Timeout during shutdown disconnect of type {type(e).__name__}: {e}")
-        finally:
-            # Additional cleanup if needed, though _disconnect should handle client
-            self._client = None
-            # Release any local resources that might be holding references
-            self._emg_handler = None
-            self._imu_handler = None
-            print("[MyoManager] Shutdown complete.")
+        # 2. Clear connection callback to prevent UI updates during shutdown
+        self._connection_changed_callback = None
+        
+        # 3. Force client disconnection synchronously if client exists
+        if self._client:
+            print("[MyoManager] Forcefully disconnecting client during shutdown...")
+            try:
+                # Direct synchronous cleanup - no awaiting
+                self._client = None  # Release the client reference first
+                self._connected = False  # Ensure we're marked as disconnected
+            except Exception as e:
+                print(f"[MyoManager] Error during forceful disconnect: {e}")
+        else:
+            print("[MyoManager] No client to disconnect during shutdown.")
+        
+        # 4. Release all other resources
+        self._battery = None
+        self._emg_handler = None
+        self._imu_handler = None
+        
+        # Set final shutdown state
+        print("[MyoManager] Shutdown complete.")
 
     # ── public read‑only props ───────────────────────────────────────────
     @property

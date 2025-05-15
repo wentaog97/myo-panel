@@ -1,5 +1,5 @@
 # main.py  (entry-point for `python -m myo_panel` or `myo-panel` script)
-import sys, asyncio, pathlib, time, atexit, signal
+import sys, asyncio, pathlib, time, atexit, signal, os
 from PySide6.QtWidgets import QApplication, QMessageBox
 from qasync import QEventLoop, asyncSlot
 from .ble.myo_manager import MyoManager, stop_bg_loop
@@ -10,13 +10,23 @@ import pyqtgraph as pg
 # For clean application exit
 def cleanup():
     print("Application cleanup: stopping background event loop...")
-    stop_bg_loop()
+    try:
+        stop_bg_loop()
+        # Forcibly exit after a short delay if cleanup doesn't work
+        import threading
+        threading.Timer(1.0, lambda: os._exit(0)).start()
+    except Exception as e:
+        print(f"Error during cleanup: {e}")
+        # Force exit as a last resort
+        os._exit(0)
 
 def signal_handler(sig, frame):
     print(f"Received signal {sig}, initiating shutdown...")
+    # Force exit after a timeout
+    import threading, os
+    threading.Timer(2.0, lambda: os._exit(0)).start()
     # Attempt to exit cleanly
     QApplication.instance().quit()
-    sys.exit(0)
 
 def main():
     # Register cleanup functions

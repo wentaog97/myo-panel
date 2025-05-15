@@ -689,6 +689,9 @@ class MainWindow(QMainWindow):
         """Handle application close."""
         print("MainWindow: closeEvent called.")
 
+        # Flag to indicate shutdown is in progress
+        self._shutting_down = True
+
         # Cancel the scan/connect task if it's running
         if self._scan_connect_task and not self._scan_connect_task.done():
             print("MainWindow: Cancelling active scan/connect task.")
@@ -699,7 +702,7 @@ class MainWindow(QMainWindow):
         # Initiate MyoManager shutdown. This is a blocking call with a timeout.
         print("MainWindow: Initiating MyoManager shutdown...")
         if self.myo:  # Ensure myo object exists
-            self.myo.shutdown(timeout=5.0) # Wait up to 5 seconds for Myo to clean up
+            self.myo.shutdown(timeout=2.0) # Reduced timeout for faster exit
             print("MainWindow: MyoManager shutdown process completed or timed out.")
         else:
             print("MainWindow: MyoManager instance not found.")
@@ -718,19 +721,25 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QApplication
         from ..ble.myo_manager import stop_bg_loop
         
-        # Schedule application exit to ensure proper cleanup
-        QApplication.instance().aboutToQuit.connect(stop_bg_loop)
+        # Direct cleanup of the background loop
+        stop_bg_loop()
         
         # Force application to quit after a short delay if it hasn't exited naturally
         from PySide6.QtCore import QTimer
         def force_quit():
             print("MainWindow: Forcing application exit")
-            import os, signal
-            # Send SIGTERM to our own process
-            os.kill(os.getpid(), signal.SIGTERM)
+            import os, signal, sys
+            # First try SIGTERM
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+                # Short delay to allow SIGTERM to work
+                QTimer.singleShot(500, lambda: sys.exit(1))
+            except Exception as e:
+                print(f"MainWindow: Error during force quit: {e}")
+                sys.exit(1)  # Exit with error
             
-        # Give the application 2 seconds to exit naturally, then force quit
-        QTimer.singleShot(2000, force_quit)
+        # Give the application much less time (1 second) to exit naturally, then force quit
+        QTimer.singleShot(1000, force_quit)
 
     # ------------- connection state change callback ------------------
     def _on_connection_changed(self, connected, reason):
