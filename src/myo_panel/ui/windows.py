@@ -393,8 +393,29 @@ class MainWindow(QMainWindow):
         self.scan_act.setEnabled(False)
         self.status_lbl.setText("Scanning…")
         
+        # Add a timeout timer to abort excessively long operations
+        connection_timeout = QTimer(self)
+        connection_timeout.setSingleShot(True)
+        connection_timeout.setInterval(10000)  # 10 seconds timeout
+        
+        # Force abort function for connection that takes too long
+        def _connection_timeout_handler():
+            if self._scanning and self._scan_connect_task and not self._scan_connect_task.done():
+                print("[MainWindow] Connection timeout - forcing abort")
+                self._scan_connect_task.cancel()
+                self.status_lbl.setText("Connection timed out")
+                self._scanning = False
+                self.scan_act.setEnabled(True)
+                from PySide6.QtWidgets import QApplication
+                QApplication.processEvents()
+        
+        connection_timeout.timeout.connect(_connection_timeout_handler)
+        
         async def _do():
             try:
+                # Start the timeout timer
+                connection_timeout.start()
+                
                 loop = asyncio.get_running_loop()
                 devs = await loop.run_in_executor(None, self.myo.scan)
                 
@@ -453,6 +474,9 @@ class MainWindow(QMainWindow):
                         self.off_act.setEnabled(False)
                         self.vib_act.setEnabled(False)
                         self.pause_act.setEnabled(False)
+                        self.scan_act.setEnabled(True)  # Make sure scan button is re-enabled
+                        # Reset the scanning flag since connection failed
+                        self._scanning = False
                         if hasattr(self.record_panel, 'timer_btn'): 
                             self.record_panel.timer_btn.setEnabled(False)
                             self.record_panel.free_btn.setEnabled(False)
@@ -466,6 +490,9 @@ class MainWindow(QMainWindow):
                 except RuntimeError:
                     print("[MainWindow._do] RuntimeError setting status for cancellation (expected if window is closing).")
             finally:
+                # Stop the timeout timer
+                connection_timeout.stop()
+                
                 # ---- Non-UI cleanup (MUST execute) ----
                 self._scanning = False # Always reset scanning flag
                 self._scan_connect_task = None # Clear the task reference
@@ -486,6 +513,10 @@ class MainWindow(QMainWindow):
                         final_disconnected_states = ["Disconnected", "No MYO found", "Scan cancelled", "Operation Cancelled"]
                         if not self.myo.connected and current_status not in final_disconnected_states:
                              self.status_lbl.setText("Disconnected")
+                    
+                    # Force UI update to ensure changes are reflected immediately
+                    from PySide6.QtWidgets import QApplication
+                    QApplication.processEvents()
 
                 except RuntimeError: # Catch if Qt objects are deleted during finally
                     print("[MainWindow._do] RuntimeError accessing Qt objects in finally block (expected if window is closing).")
@@ -686,5 +717,25 @@ class MainWindow(QMainWindow):
             if hasattr(self.vision_recording, "camera_manager") and self.vision_recording.camera_manager.running:
                 print("MainWindow: Forcing camera_manager stop as a fallback.")
                 self.vision_recording.camera_manager.stop()
+        
+        # Call parent's closeEvent
         super().closeEvent(event)
         print("MainWindow: closeEvent completed. Application should now exit if all non-daemon threads are done.")
+        
+        # Import inside the method to avoid circular imports
+        from PySide6.QtWidgets import QApplication
+        from ..ble.myo_manager import stop_bg_loop
+        
+        # Schedule application exit to ensure proper cleanup
+        QApplication.instance().aboutToQuit.connect(stop_bg_loop)
+        
+        # Force application to quit after a short delay if it hasn't exited naturally
+        from PySide6.QtCore import QTimer
+        def force_quit():
+            print("MainWindow: Forcing application exit")
+            import os, signal
+            # Send SIGTERM to our own process
+            os.kill(os.getpid(), signal.SIGTERM)
+            
+        # Give the application 2 seconds to exit naturally, then force quit
+        QTimer.singleShot(2000, force_quit)

@@ -1,14 +1,29 @@
 # main.py  (entry-point for `python -m myo_panel` or `myo-panel` script)
-import sys, asyncio, pathlib
+import sys, asyncio, pathlib, time, atexit, signal
 from PySide6.QtWidgets import QApplication, QMessageBox
 from qasync import QEventLoop, asyncSlot
-from .ble.myo_manager import MyoManager
+from .ble.myo_manager import MyoManager, stop_bg_loop
 from .ui.windows import MainWindow
 
 import pyqtgraph as pg
 
+# For clean application exit
+def cleanup():
+    print("Application cleanup: stopping background event loop...")
+    stop_bg_loop()
+
+def signal_handler(sig, frame):
+    print(f"Received signal {sig}, initiating shutdown...")
+    # Attempt to exit cleanly
+    QApplication.instance().quit()
+    sys.exit(0)
 
 def main():
+    # Register cleanup functions
+    atexit.register(cleanup)
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     pg.setConfigOptions(useOpenGL=True, antialias=False)     
 
     app = QApplication(sys.argv)
@@ -46,8 +61,22 @@ def main():
     
     mgr._imu_handler = _imu_handler
 
+    # Ensure proper cleanup when the application exits
+    app.aboutToQuit.connect(lambda: mgr.shutdown(timeout=2.0))
+    app.aboutToQuit.connect(cleanup)
+
     with loop:
-        loop.run_forever()
+        try:
+            loop.run_forever()
+        except KeyboardInterrupt:
+            print("KeyboardInterrupt received, shutting down...")
+        finally:
+            # Ensure cleanup on any exit path
+            mgr.shutdown(timeout=1.0)
+            loop.close()
+            print("Main event loop closed.")
+            # Explicitly call stop_bg_loop to ensure background tasks are stopped
+            stop_bg_loop()
 
 if __name__ == "__main__":
     main()

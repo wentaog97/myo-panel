@@ -24,7 +24,8 @@ from .myo_constants import (
 
 # ── dedicated background asyncio loop ────────────────────────────────────
 _bg_loop = asyncio.new_event_loop()
-threading.Thread(target=_bg_loop.run_forever, daemon=True).start()
+_bg_thread = threading.Thread(target=_bg_loop.run_forever, daemon=True)
+_bg_thread.start()
 
 def run_async(coro, timeout=None):          # blocking helper
     future = asyncio.run_coroutine_threadsafe(coro, _bg_loop)
@@ -32,6 +33,26 @@ def run_async(coro, timeout=None):          # blocking helper
 
 def fire_and_forget(coro):    # schedule without awaiting
     asyncio.run_coroutine_threadsafe(coro, _bg_loop)
+
+# For clean shutdown
+def stop_bg_loop():
+    """Stop the background event loop and clean up resources."""
+    if _bg_loop.is_running():
+        # Cancel all running tasks
+        for task in asyncio.all_tasks(_bg_loop):
+            task.cancel()
+        
+        # Schedule loop stop
+        asyncio.run_coroutine_threadsafe(_bg_loop.shutdown_asyncgens(), _bg_loop)
+        _bg_loop.call_soon_threadsafe(_bg_loop.stop)
+        
+        # Give it a little time to clean up
+        timeout = 3.0  # seconds
+        start_time = time.time()
+        while _bg_loop.is_running() and (time.time() - start_time) < timeout:
+            time.sleep(0.1)
+            
+        print("[MyoManager] Background loop stopped.")
 
 # ─────────────────────────────────────────────────────────────────────────
 class MyoManager:
@@ -72,7 +93,20 @@ class MyoManager:
         self._emg_mode = emg_mode
         self._imu_mode = imu_mode
         cmd = bytearray([0x01, 3, emg_mode, imu_mode, 0x00])
-        run_async(self._connect(address, cmd)) # This can still block if _connect doesn't timeout properly
+        try:
+            # This can still block if _connect doesn't timeout properly
+            run_async(self._connect(address, cmd))
+        except Exception as e:
+            # Ensure we're fully disconnected on any error
+            fire_and_forget(self._disconnect())
+            # Convert common BLE errors to more user-friendly messages
+            if "not found" in str(e).lower() or "no device" in str(e).lower():
+                raise ConnectionError(f"Device {address} was not found") from e
+            elif "timeout" in str(e).lower():
+                raise ConnectionError(f"Connection to device {address} timed out") from e
+            else:
+                # Propagate original error
+                raise
 
     def update_modes(self, emg_mode: int = None, imu_mode: int = None) -> None:
         """Update EMG and IMU modes on a connected device."""
@@ -103,11 +137,17 @@ class MyoManager:
         """Initiates shutdown of the MyoManager, attempting a graceful disconnect."""
         print("[MyoManager] Shutdown initiated.")
         self._shutting_down = True
+        
+        # Cancel any outstanding operations
+        for task in asyncio.all_tasks(_bg_loop):
+            if not task.done() and task != asyncio.current_task(_bg_loop):
+                task.cancel()
+        
         # Stop new operations from starting
         # Try to disconnect if a client exists or might be connecting
         try:
             # We run _disconnect which is async. run_async will block until it's done or timeout.
-            run_async(self._disconnect(), timeout=timeout)
+            run_async(self._disconnect(), timeout=timeout/2)  # Use half the timeout for disconnect
             print("[MyoManager] Disconnect attempt in shutdown finished or timed out.")
         except Exception as e:
             # This includes timeout from future.result(timeout) in run_async
@@ -115,6 +155,10 @@ class MyoManager:
             print(f"[MyoManager] Error/Timeout during shutdown disconnect of type {type(e).__name__}: {e}")
         finally:
             # Additional cleanup if needed, though _disconnect should handle client
+            self._client = None
+            # Release any local resources that might be holding references
+            self._emg_handler = None
+            self._imu_handler = None
             print("[MyoManager] Shutdown complete.")
 
     # ── public read‑only props ───────────────────────────────────────────
@@ -170,7 +214,26 @@ class MyoManager:
 
                 self._client = BleakClient(addr)
                 # Add a timeout to the connect call (e.g., 15 seconds)
-                await asyncio.wait_for(self._client.connect(), timeout=15.0)
+                try:
+                    # Explicit timeout for the connect call
+                    await asyncio.wait_for(self._client.connect(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    self._last_error = "Connection timed out after 15 seconds"
+                    print(f"[MyoManager] Connect timeout: {addr}")
+                    await self._disconnect()
+                    raise ConnectionError(f"Connection to device {addr} timed out")
+                except Exception as connect_exc:
+                    self._last_error = f"connect failed: {connect_exc}"
+                    if "not found" in str(connect_exc).lower() or "no device" in str(connect_exc).lower():
+                        print(f"[MyoManager] Device not found: {addr}")
+                        await self._disconnect()  
+                        raise ConnectionError(f"Device {addr} was not found")
+                    else:
+                        print(f"[MyoManager] Connect error: {connect_exc}")
+                        await self._disconnect()
+                        raise
+
+                # Set disconnect callback
                 self._client.set_disconnected_callback(self._on_ble_disconnect)
 
                 # Check if shutting down before proceeding with post-connection setup
