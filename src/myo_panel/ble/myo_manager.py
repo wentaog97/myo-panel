@@ -76,6 +76,7 @@ class MyoManager:
         self._emg_handler, self._imu_handler = emg_handler, imu_handler
         self._shutting_down = False # Flag to indicate shutdown
         self.model_names = MYO_MODEL_NAMES
+        self._connection_changed_callback = None  # Callback for connection state changes
 
     # ── synchronous wrappers ─────────────────────────────────────────────
     def scan(self) -> List[Dict[str, str]]:
@@ -98,7 +99,7 @@ class MyoManager:
             run_async(self._connect(address, cmd))
         except Exception as e:
             # Ensure we're fully disconnected on any error
-            fire_and_forget(self._disconnect())
+            fire_and_forget(self._disconnect(silent=True))
             # Convert common BLE errors to more user-friendly messages
             if "not found" in str(e).lower() or "no device" in str(e).lower():
                 raise ConnectionError(f"Device {address} was not found") from e
@@ -123,7 +124,7 @@ class MyoManager:
         cmd = bytearray([0x01, 3, self._emg_mode, self._imu_mode, 0x00])
         return run_async(self._update_modes(cmd))
 
-    def disconnect_async(self) -> None:    fire_and_forget(self._disconnect())
+    def disconnect_async(self) -> None:    fire_and_forget(self._disconnect(silent=False))
     def vibrate_async(self, pat="medium"): fire_and_forget(self._vibrate(pat))
     def deep_sleep_async(self):
         if self._shutting_down: return # Added shutdown check
@@ -147,7 +148,8 @@ class MyoManager:
         # Try to disconnect if a client exists or might be connecting
         try:
             # We run _disconnect which is async. run_async will block until it's done or timeout.
-            run_async(self._disconnect(), timeout=timeout/2)  # Use half the timeout for disconnect
+            # Use silent=True to avoid callbacks during shutdown
+            run_async(self._disconnect(silent=True), timeout=timeout/2)  # Use half the timeout for disconnect
             print("[MyoManager] Disconnect attempt in shutdown finished or timed out.")
         except Exception as e:
             # This includes timeout from future.result(timeout) in run_async
@@ -201,10 +203,10 @@ class MyoManager:
             print("[MyoManager] _connect called during shutdown, aborting.")
             # Ensure we don't leave things in a weird state; _disconnect might be too much here if no client yet
             # but _disconnect handles self._client being None.
-            await self._disconnect() # Ensure any partial setup is cleared
+            await self._disconnect(silent=True) # Ensure any partial setup is cleared
             return
 
-        await self._disconnect() # Ensure any previous connection is cleared
+        await self._disconnect(silent=True) # Ensure any previous connection is cleared with no callback
         async with self._lock:
             try:
                 if self._shutting_down: # Check again after acquiring lock
@@ -250,6 +252,14 @@ class MyoManager:
                 await self._client.write_gatt_char(C.COMMAND_UUID, C.NEVER_SLEEP_CMD, response=True)
 
                 self._connected = True
+                
+                # Notify UI about successful connection
+                if self._connection_changed_callback:
+                    try:
+                        self._connection_changed_callback(True, "connected")
+                    except Exception as e:
+                        print(f"[MyoManager] Error in connection changed callback: {e}")
+                        
                 await self._read_battery(); await self._read_model(); await self._read_firmware()
                 await self._start_emg(); await self._start_imu()
                 print("[MyoManager] connected to", addr)
@@ -263,9 +273,17 @@ class MyoManager:
                 if not self._shutting_down : # Only re-raise if not a shutdown-induced error
                     raise
 
-    async def _disconnect(self):
+    async def _disconnect(self, silent=False):
+        """Disconnect from the MYO device.
+        
+        Args:
+            silent: If True, don't trigger the connection_changed_callback.
+                   This is useful for routine disconnects during a connection attempt.
+        """
         # No explicit shutdown check here, as disconnect is part of shutdown.
         async with self._lock:
+            was_connected = self._connected and self._client and self._client.is_connected
+            
             if self._client and self._client.is_connected:
                 try: 
                     print("[MyoManager] Attempting to disconnect bleak client...")
@@ -277,11 +295,21 @@ class MyoManager:
                     pass # Already catching, but be more verbose
             else:
                 print("[MyoManager] No active or connected bleak client to disconnect.")
+                
             self._client = None; self._battery = None; self._connected = False
+            
             # Don't print "[MyoManager] disconnected" if we are in the process of shutting down,
             # as the shutdown method will print its own status.
             if not self._shutting_down:
                 print("[MyoManager] disconnected (normal operation)")
+                
+                # Notify about disconnection if callback is set, not shutting down, and not silent
+                # Only trigger callback if we were actually connected before (avoid spurious callbacks)
+                if self._connection_changed_callback and not silent and was_connected:
+                    try:
+                        self._connection_changed_callback(False, "disconnect")
+                    except Exception as e:
+                        print(f"[MyoManager] Error in connection changed callback: {e}")
             else:
                 print("[MyoManager] _disconnect called during shutdown process.")
 
@@ -300,7 +328,9 @@ class MyoManager:
                 C.COMMAND_UUID, C.DEEP_SLEEP_CMD, response=True
             )
         finally:
-            await self._disconnect()
+            # Use normal disconnect with callbacks since this is an intentional disconnect
+            # that should update the UI
+            await self._disconnect(silent=False)
             
     async def _update_modes(self, cmd):
         """Send a new command to update the EMG and IMU modes on an already connected device."""
@@ -408,7 +438,7 @@ class MyoManager:
                 self._fw = f"{int.from_bytes(d[0:2],'little')}."                            f"{int.from_bytes(d[2:4],'little')}."                            f"{int.from_bytes(d[4:6],'little')}"
         except Exception: self._fw = None
 
-    # ── Bleak disconnect callback ────────────────────────────────────────
+    # ── Bleak disconnect callback ────────────────────────────────────────────
     def _on_ble_disconnect(self, _):
         # This is a callback from bleak, can be called unexpectedly
         print("[MyoManager] BLE disconnected callback triggered.")
@@ -419,10 +449,27 @@ class MyoManager:
         # If shutting down, this is expected. If not, it's an external disconnect.
         if not self._shutting_down:
             print("[MyoManager] External disconnect detected.")
-            # Optionally, schedule a reconnect or notify UI, but be careful about loops.
-            # For now, just log it.
+            # Could notify UI or handle disconnection here if needed
+            # But be careful about threading since this is called from bleak's thread
+            self._last_error = "Device disconnected unexpectedly"
+            
+            # Notify UI about disconnection if callback is set
+            if self._connection_changed_callback:
+                try:
+                    self._connection_changed_callback(False, "unexpected_disconnect")
+                except Exception as e:
+                    print(f"[MyoManager] Error in connection changed callback: {e}")
 
     def get_model_name(self, hw_type: int) -> str:
         """Get the model name for a given hardware type."""
         return self.model_names.get(hw_type, self.model_names[0])
+
+    def set_connection_callback(self, callback):
+        """Set a callback to be called when connection state changes.
+        
+        The callback should accept two parameters:
+        - connected: bool - whether the device is now connected
+        - reason: str - reason for the state change (e.g., "connected", "disconnect", "unexpected_disconnect")
+        """
+        self._connection_changed_callback = callback
 

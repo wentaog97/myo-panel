@@ -97,6 +97,7 @@ class VisionRecordingWidget(QWidget):
         super().__init__(parent)
         
         self.camera_manager = CameraManager()
+        self.recording = False  # Added recording flag
         
         layout = QVBoxLayout(self)
         
@@ -172,6 +173,29 @@ class VisionRecordingWidget(QWidget):
         if self.camera_manager:
             return self.camera_manager.get_latest_landmarks()
         return None
+    
+    def _start_recording(self):
+        """Start recording vision data.
+        
+        This doesn't actually store the data, just ensures the camera is running
+        so that landmarks can be retrieved via get_latest_landmarks().
+        """
+        self.recording = True
+        # Make sure camera is running when recording starts
+        if not self.camera_manager.running:
+            # Start the camera if it's not already running
+            if self.camera_manager.start():
+                self.timer.start()
+                self.preview_btn.setText("Stop Preview")
+                self.status_label.setText("Camera: Recording")
+                self.status_label.setStyleSheet("color: green;")
+    
+    def _stop_recording(self):
+        """Stop recording vision data."""
+        self.recording = False
+        # We don't stop the camera here, just mark that we're not recording anymore
+        if self.camera_manager.running:
+            self.status_label.setText("Camera: Running")
     
     def showEvent(self, event):
         """Handle show event."""

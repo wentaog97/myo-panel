@@ -137,7 +137,14 @@ class RecordingPanel(QGroupBox):
             # Get the parent window to access vision recorder
             parent = self.window()
             if parent and hasattr(parent, "vision_recording") and parent.vision_recording:
-                parent.vision_recording._start_recording()
+                try:
+                    # Safely call _start_recording method if it exists
+                    if hasattr(parent.vision_recording, "_start_recording"):
+                        parent.vision_recording._start_recording()
+                    else:
+                        print("[Recorder] Warning: vision_recording has no _start_recording method")
+                except Exception as e:
+                    print(f"[Recorder] Error starting vision recording: {e}")
 
     def _stop_recording(self):
         self._active = False
@@ -146,8 +153,16 @@ class RecordingPanel(QGroupBox):
         # Stop vision recording if it was started
         parent = self.window()
         if parent and hasattr(parent, "vision_recording") and parent.vision_recording:
-            if parent.vision_recording.recording:
-                parent.vision_recording._stop_recording()
+            # Check if recording attribute exists first
+            if hasattr(parent.vision_recording, "recording") and parent.vision_recording.recording:
+                try:
+                    # Safely call _stop_recording method
+                    if hasattr(parent.vision_recording, "_stop_recording"):
+                        parent.vision_recording._stop_recording()
+                    else:
+                        print("[Recorder] Warning: vision_recording has no _stop_recording method")
+                except Exception as e:
+                    print(f"[Recorder] Error stopping vision recording: {e}")
                 
         self._save_file()
 
@@ -163,7 +178,14 @@ class RecordingPanel(QGroupBox):
         if self.enable_vision_chk.isChecked():
             parent = self.window()
             if parent and hasattr(parent, "vision_recording") and parent.vision_recording:
-                vision_data = parent.vision_recording.get_latest_landmarks()
+                try:
+                    # Get latest landmarks data from the vision_recording
+                    landmarks = parent.vision_recording.get_latest_landmarks()
+                    # Process landmarks into a more structured format for CSV export
+                    if landmarks and "hands" in landmarks and landmarks["hands"]:
+                        vision_data = landmarks
+                except Exception as e:
+                    print(f"[Recorder] Error getting vision data: {e}")
 
         if self.raw_chk.isChecked() and raw_hex:
             # Store raw hex data
@@ -287,8 +309,29 @@ class RecordingPanel(QGroupBox):
                                ",quat_w,quat_x,quat_y,quat_z," +
                                "acc_x,acc_y,acc_z," +
                                "gyro_x,gyro_y,gyro_z,label" +
-                               ",vision_data\n")
+                               ",hand_count,hand1_type" +
+                               "".join([f",hand1_landmark{i}_x,hand1_landmark{i}_y,hand1_landmark{i}_z" for i in range(21)]) +
+                               ",hand2_type" +
+                               "".join([f",hand2_landmark{i}_x,hand2_landmark{i}_y,hand2_landmark{i}_z" for i in range(21)]) +
+                               "\n")
                         
+                        # Write processed data with EMG and IMU together
+                        # Add comment explaining vision data format
+                        f.write("# Vision landmark data: hand_count is the number of detected hands (0, 1, or 2).\n")
+                        f.write("# Each hand has 21 landmarks representing finger joints and palm features.\n")
+                        f.write("# For each landmark, x and y are normalized to [0.0, 1.0] within image coordinates.\n")
+                        f.write("# z represents depth (smaller values are closer to camera).\n")
+                        f.write("# Format: timestamp," + 
+                               ",".join(f"emg_{i}" for i in range(8)) +
+                               ",quat_w,quat_x,quat_y,quat_z," +
+                               "acc_x,acc_y,acc_z," +
+                               "gyro_x,gyro_y,gyro_z,label" +
+                               ",hand_count,hand1_type" +
+                               "".join([f",hand1_landmark{i}_x,hand1_landmark{i}_y,hand1_landmark{i}_z" for i in range(21)]) +
+                               ",hand2_type" +
+                               "".join([f",hand2_landmark{i}_x,hand2_landmark{i}_y,hand2_landmark{i}_z" for i in range(21)]) +
+                               "\n")
+
                         writer.writerow(
                             ["timestamp"] +
                             [f"emg_{i}" for i in range(8)] +
@@ -296,7 +339,10 @@ class RecordingPanel(QGroupBox):
                             ["acc_x", "acc_y", "acc_z"] +
                             ["gyro_x", "gyro_y", "gyro_z"] +
                             ["label"] +
-                            ["vision_data"]
+                            ["hand_count", "hand1_type"] +
+                            [f"hand1_landmark{i}_{coord}" for i in range(21) for coord in ["x", "y", "z"]] +
+                            ["hand2_type"] +
+                            [f"hand2_landmark{i}_{coord}" for i in range(21) for coord in ["x", "y", "z"]]
                         )
 
                         for row in self._recording:
@@ -322,14 +368,55 @@ class RecordingPanel(QGroupBox):
                                 else:
                                     data.extend([""]*3)
                                 
+                                # Add label
                                 data.append(row["label"])
                                 
+                                # Process vision data
+                                # Default empty values for hand data
+                                hand_count = 0
+                                hand1_type = ""
+                                hand1_landmarks = [""] * (21 * 3)  # 21 landmarks * (x,y,z)
+                                hand2_type = ""
+                                hand2_landmarks = [""] * (21 * 3)
+
                                 # Add vision data if available
-                                if row.get("vision"):
-                                    data.append("YES")  # Just indicate presence of vision data in CSV
-                                else:
-                                    data.append("")
+                                if "vision" in row and row["vision"]:
+                                    vision = row["vision"]
                                     
+                                    # Extract hand data
+                                    if "hands" in vision and vision["hands"]:
+                                        hands = vision["hands"]
+                                        hand_count = len(hands)
+                                        
+                                        if hand_count > 0:
+                                            # First hand data
+                                            hand1 = hands[0]
+                                            hand1_type = hand1["type"]
+                                            landmarks = hand1["landmarks"]
+                                            for i, lm in enumerate(landmarks[:21]):  # Ensure we only use up to 21 landmarks
+                                                idx = i * 3
+                                                hand1_landmarks[idx] = lm["x"]
+                                                hand1_landmarks[idx + 1] = lm["y"]
+                                                hand1_landmarks[idx + 2] = lm["z"]
+                                        
+                                        if hand_count > 1:
+                                            # Second hand data
+                                            hand2 = hands[1]
+                                            hand2_type = hand2["type"]
+                                            landmarks = hand2["landmarks"]
+                                            for i, lm in enumerate(landmarks[:21]):  # Ensure we only use up to 21 landmarks
+                                                idx = i * 3
+                                                hand2_landmarks[idx] = lm["x"]
+                                                hand2_landmarks[idx + 1] = lm["y"]
+                                                hand2_landmarks[idx + 2] = lm["z"]
+                                
+                                # Add vision data to CSV row
+                                data.append(hand_count)
+                                data.append(hand1_type)
+                                data.extend(hand1_landmarks)
+                                data.append(hand2_type)
+                                data.extend(hand2_landmarks)
+
                                 writer.writerow(data)
             else:
                 # Save as pickle with all data

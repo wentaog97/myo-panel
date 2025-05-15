@@ -6,6 +6,7 @@ from PySide6.QtGui     import QAction, QActionGroup
 from PySide6.QtCore import QTimer, Qt
 import asyncio, numpy as np
 from collections import deque
+import time
 
 from .plots import _Ring, EMGGrid, EMGComposite
 from .recording import RecordingPanel
@@ -31,6 +32,9 @@ class MainWindow(QMainWindow):
         self._imu_mode = 1  # IMU_MODE_SEND_DATA
         self.myo._emg_mode = self._emg_mode
         self.myo._imu_mode = self._imu_mode
+        
+        # Register connection callback to handle connection state changes from MyoManager
+        self.myo.set_connection_callback(self._on_connection_changed)
 
         # ── top toolbar ────────────────────────────────────────────────
         tb = QToolBar()
@@ -295,6 +299,9 @@ class MainWindow(QMainWindow):
         # ── timers ────────────────────────────────────────────────────
         QTimer(self, interval=FRAME_UPDATE_INTERVAL, timeout=self._refresh_plots).start()
         QTimer(self, interval=BATTERY_CHECK_INTERVAL, timeout=self._query_battery).start()
+        
+        # Add a connection status checker timer - runs every 500ms to ensure UI is accurate
+        QTimer(self, interval=500, timeout=self._check_connection_status).start()
 
         # ── connect actions ───────────────────────────────────────────
         self.scan_act.triggered.connect(self._scan_connect)
@@ -384,8 +391,6 @@ class MainWindow(QMainWindow):
     def _scan_connect(self):
         # Prevent multiple scan operations
         if self._scanning:
-            # Optionally, if a task is already running, log or cancel it first
-            # For now, self._scanning flag handles this as before.
             return
         
         # Update scan button state
@@ -396,18 +401,17 @@ class MainWindow(QMainWindow):
         # Add a timeout timer to abort excessively long operations
         connection_timeout = QTimer(self)
         connection_timeout.setSingleShot(True)
-        connection_timeout.setInterval(10000)  # 10 seconds timeout
+        connection_timeout.setInterval(15000)  # 15 seconds timeout
         
         # Force abort function for connection that takes too long
         def _connection_timeout_handler():
             if self._scanning and self._scan_connect_task and not self._scan_connect_task.done():
+                # Cancel the task if it's still running after timeout
                 print("[MainWindow] Connection timeout - forcing abort")
                 self._scan_connect_task.cancel()
-                self.status_lbl.setText("Connection timed out")
-                self._scanning = False
-                self.scan_act.setEnabled(True)
-                from PySide6.QtWidgets import QApplication
-                QApplication.processEvents()
+                # Skip status update - let the status checker handle it consistently
+                # This avoids showing misleading status messages
+                pass
         
         connection_timeout.timeout.connect(_connection_timeout_handler)
         
@@ -423,7 +427,6 @@ class MainWindow(QMainWindow):
                 await asyncio.sleep(0) # Allows task to be cancelled if requested
                 if not devs:
                     self.status_lbl.setText("No MYO found")
-                    # self._scanning and self.scan_act handled in finally
                     return
 
                 from PySide6.QtWidgets import QInputDialog, QDialog
@@ -439,7 +442,6 @@ class MainWindow(QMainWindow):
                 await asyncio.sleep(0)
                 if dlg.exec() != QDialog.Accepted:
                     self.status_lbl.setText("Scan cancelled")
-                    # self._scanning and self.scan_act handled in finally
                     return
 
                 idx = items.index(dlg.textValue())
@@ -451,133 +453,108 @@ class MainWindow(QMainWindow):
                 try:
                     # Use the configured EMG and IMU modes
                     await loop.run_in_executor(None, lambda: self.myo.connect(addr, emg_mode=self._emg_mode, imu_mode=self._imu_mode))
-                    self.status_lbl.setText(f"Streaming from {name}")
                     
-                    # Enable controls now that we're connected
-                    self.disc_act.setEnabled(True)
-                    self.off_act.setEnabled(True)
-                    self.vib_act.setEnabled(True)
-                    self.pause_act.setEnabled(True)
-                    self.record_panel.timer_btn.setEnabled(True)
-                    self.record_panel.free_btn.setEnabled(True)
+                    # Explicit status update when connection succeeds
+                    print(f"[MainWindow] Connected to {name}")
                     
-                    self.scan_act.setEnabled(False) # Keep Scan button disabled when connected
-                    QTimer.singleShot(500, self._update_mode_status)
+                    # Update UI status explicitly here even though the callback should also do it
+                    # This provides redundancy in case the callback has issues
+                    self.status_lbl.setText(f"Connected to {name}")
+                    
+                    # Schedule another status update for detailed info
+                    QTimer.singleShot(200, self._update_mode_status)
+                    
                 except Exception as exc:
-                    # Check for cancellation before showing message box or if Qt objects are gone
-                    await asyncio.sleep(0) 
+                    # Handle connection errors
+                    print(f"[MainWindow] Connect error: {exc}")
+                    self.status_lbl.setText(f"Connection failed: {str(exc)}")
+                    
+                    # Show error dialog
                     try:
                         from PySide6.QtWidgets import QMessageBox
                         QMessageBox.critical(self, "Connect failed", str(exc))
-                        self.status_lbl.setText("Disconnected")
-                        self.disc_act.setEnabled(False)
-                        self.off_act.setEnabled(False)
-                        self.vib_act.setEnabled(False)
-                        self.pause_act.setEnabled(False)
-                        self.scan_act.setEnabled(True)  # Make sure scan button is re-enabled
-                        # Reset the scanning flag since connection failed
-                        self._scanning = False
-                        if hasattr(self.record_panel, 'timer_btn'): 
-                            self.record_panel.timer_btn.setEnabled(False)
-                            self.record_panel.free_btn.setEnabled(False)
-                    except RuntimeError: # Handles cases where Qt objects are already deleted
-                        print("[MainWindow._do] RuntimeError accessing Qt objects in connect exception handler (expected if window is closing).")
+                    except RuntimeError:
+                        # Handle case where Qt objects are deleted
+                        pass
             except asyncio.CancelledError:
                 print("[MainWindow._do] Scan/connect task was cancelled.")
-                try:
-                    if hasattr(self, 'status_lbl'): # Check if status_lbl still exists
-                         self.status_lbl.setText("Operation Cancelled")
-                except RuntimeError:
-                    print("[MainWindow._do] RuntimeError setting status for cancellation (expected if window is closing).")
+                # Skip status update entirely - let the status checker handle it
+                # This avoids any misleading messages about waiting for the device
+                pass
+            except Exception as e:
+                print(f"[MainWindow._do] Unexpected error: {e}")
+                self.status_lbl.setText(f"Error: {str(e)}")
             finally:
                 # Stop the timeout timer
                 connection_timeout.stop()
                 
-                # ---- Non-UI cleanup (MUST execute) ----
-                self._scanning = False # Always reset scanning flag
-                self._scan_connect_task = None # Clear the task reference
-
-                # ---- UI cleanup (CAN FAIL if window/widgets are gone) ----
-                try:
-                    # Ensure self.scan_act (QAction) exists before accessing it
-                    if hasattr(self, 'scan_act'):
-                        if not self.myo.connected: # Only re-enable scan if not connected
-                            self.scan_act.setEnabled(True)
-                        else: # If connected, scan should remain disabled
-                            self.scan_act.setEnabled(False)
-                    
-                    if hasattr(self, 'status_lbl'):
-                        # If connected and status was 'Operation Cancelled', _update_mode_status (if called) will fix it.
-                        # If not connected, and status isn't a final failure/cancel state, set to Disconnected.
-                        current_status = self.status_lbl.text()
-                        final_disconnected_states = ["Disconnected", "No MYO found", "Scan cancelled", "Operation Cancelled"]
-                        if not self.myo.connected and current_status not in final_disconnected_states:
-                             self.status_lbl.setText("Disconnected")
-                    
-                    # Force UI update to ensure changes are reflected immediately
-                    from PySide6.QtWidgets import QApplication
-                    QApplication.processEvents()
-
-                except RuntimeError: # Catch if Qt objects are deleted during finally
-                    print("[MainWindow._do] RuntimeError accessing Qt objects in finally block (expected if window is closing).")
+                # Reset state flags
+                self._scanning = False
+                self._scan_connect_task = None
                 
-        # Before creating a new task, ensure any old one (if any) is handled or cancelled.
-        # Though self._scanning flag should prevent overlap for this specific function.
+                # Update scan button based on connection status
+                # The rest of the UI is updated by the connection callback
+                if not self.myo.connected:
+                    self.scan_act.setEnabled(True)
+                
+        # Cancel any existing task
         if self._scan_connect_task and not self._scan_connect_task.done():
-            print("[MainWindow] Warning: Previous scan/connect task still running. Cancelling it.")
             self._scan_connect_task.cancel()
-            # It's complex to wait for it here, so we rely on the new task overwriting reference
-            # and the old task's finally block cleaning itself up.
             
         self._scan_connect_task = asyncio.create_task(_do())
 
     # ------------- manual disconnect ---------------------------------
     def _disconnect(self):
-        # Disable all controls when disconnected
-        self.disc_act.setEnabled(False)
-        self.off_act.setEnabled(False)
-        self.vib_act.setEnabled(False)
-        self.pause_act.setEnabled(False)
-        self.record_panel.timer_btn.setEnabled(False)
-        self.record_panel.free_btn.setEnabled(False)
+        # Only update status label - button states will be handled by connection callback
+        self.status_lbl.setText("Disconnecting…")
         
         # Reset pause state if active
         if self._paused:
             self._paused = False
             self.pause_act.setText("Pause Stream")
             
-        self.status_lbl.setText("Disconnecting…")
+        # Reset scanning state
+        self._scanning = False
+        
+        # Initiate disconnect - UI will be fully updated via connection callback
         self.myo.disconnect_async()
         
-        # Enable scan button again
-        self._scanning = False
-        self.scan_act.setEnabled(True)
-        
-        QTimer.singleShot(300, lambda: self.status_lbl.setText("Disconnected"))
+        # Add a safety timer to ensure UI gets updated
+        def _ensure_disconnected():
+            if self.status_lbl.text() == "Disconnecting…" and not self.myo.connected:
+                print("[MainWindow] Safety timer: Forcing 'Disconnected' status")
+                self.status_lbl.setText("Disconnected")
+                
+                # Also ensure buttons are in correct state
+                self.disc_act.setEnabled(False)
+                self.off_act.setEnabled(False)
+                self.vib_act.setEnabled(False)
+                self.pause_act.setEnabled(False)
+                self.scan_act.setEnabled(True)
+                self.record_panel.timer_btn.setEnabled(False)
+                self.record_panel.free_btn.setEnabled(False)
+                
+        # Force update after 1.5 seconds if needed
+        QTimer.singleShot(1500, _ensure_disconnected)
 
     # ------------- turn off (deep-sleep) ------------------------------
     def _turn_off(self):
+        # Only update status label - button states will be handled by connection callback
         self.status_lbl.setText("Turning off…")
-        self.myo.deep_sleep_async()
-        
-        # After deep sleep there's no MYO, so disable controls
-        self.disc_act.setEnabled(False)
-        self.off_act.setEnabled(False)
-        self.vib_act.setEnabled(False)
-        self.pause_act.setEnabled(False)
-        self.record_panel.timer_btn.setEnabled(False)
-        self.record_panel.free_btn.setEnabled(False)
         
         # Reset pause state if active
         if self._paused:
             self._paused = False
             self.pause_act.setText("Pause Stream")
         
-        # Enable scan button again
+        # Reset scanning state
         self._scanning = False
-        self.scan_act.setEnabled(True)
-            
-        QTimer.singleShot(600, lambda: self.status_lbl.setText("Disconnected"))
+        
+        # Initiate deep sleep - UI will be updated via connection callback
+        self.myo.deep_sleep_async()
+        
+        # Override final status message to be more specific about power state
+        QTimer.singleShot(600, lambda: self.status_lbl.setText("Device powered off (disconnected)"))
 
     # ------------- pause / resume ------------------------------------
     def _toggle_pause(self):
@@ -612,7 +589,22 @@ class MainWindow(QMainWindow):
         emg_mode_text = emg_modes.get(self._emg_mode, f"Unknown ({self._emg_mode})")
         imu_mode_text = imu_modes.get(self._imu_mode, f"Unknown ({self._imu_mode})")
         
+        # Update detailed status text
         self.status_lbl.setText(f"Connected | EMG: {emg_mode_text} | IMU: {imu_mode_text}")
+        
+        # IMPORTANT: Always ensure button states match connection state
+        # This guarantees UI consistency whenever detailed status is shown
+        self.disc_act.setEnabled(True)
+        self.off_act.setEnabled(True)
+        self.vib_act.setEnabled(True)
+        self.pause_act.setEnabled(True)
+        self.scan_act.setEnabled(False)  # Can't scan when connected
+        self.record_panel.timer_btn.setEnabled(True)
+        self.record_panel.free_btn.setEnabled(True)
+        
+        # Force UI update to ensure changes are visible
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
 
     # ------------- populate camera menu ----------------------------
     def _populate_camera_menu(self, menu, group):
@@ -739,3 +731,230 @@ class MainWindow(QMainWindow):
             
         # Give the application 2 seconds to exit naturally, then force quit
         QTimer.singleShot(2000, force_quit)
+
+    # ------------- connection state change callback ------------------
+    def _on_connection_changed(self, connected, reason):
+        """Handle connection state changes from MyoManager.
+        
+        This is called from MyoManager when the connection state changes,
+        either due to a successful connection, manual disconnect, or
+        unexpected disconnection.
+        
+        Args:
+            connected: bool - whether the device is now connected
+            reason: str - reason for the state change
+        """
+        try:
+            print(f"[MainWindow] Connection state changed: connected={connected}, reason={reason}")
+            
+            # Use QTimer.singleShot to safely update UI from a non-Qt thread
+            # This avoids Qt metaobject signature issues
+            from PySide6.QtCore import QTimer
+            
+            # First do an immediate state update for critical UI elements
+            # This reduces the chance of experiencing inconsistent UI state
+            QTimer.singleShot(0, lambda: self._set_ui_connected_state(connected))
+            
+            # Then do the full update with text changes
+            QTimer.singleShot(50, lambda: self._update_ui_connection_state(connected, reason))
+            
+            # Also schedule a fallback update to handle any race conditions
+            # This ensures we'll update the UI status after a short delay as a backup
+            if connected:
+                # If connected, schedule another status update as a backup
+                QTimer.singleShot(1000, lambda: 
+                    self._set_ui_connected_state(True) 
+                    if self.myo.connected 
+                    else None
+                )
+        except Exception as e:
+            print(f"[MainWindow] Error in connection callback: {e}")
+    
+    def _set_ui_connected_state(self, connected):
+        """Utility method to ensure consistent UI button states.
+        
+        Args:
+            connected: bool - whether to set connected or disconnected state
+        """
+        print(f"[MainWindow] Setting UI state to {'connected' if connected else 'disconnected'}")
+        
+        if connected:
+            # Connected state
+            self.disc_act.setEnabled(True)
+            self.off_act.setEnabled(True)
+            self.vib_act.setEnabled(True)
+            self.pause_act.setEnabled(True)
+            self.scan_act.setEnabled(False)  # Can't scan while connected
+            self.record_panel.timer_btn.setEnabled(True)
+            self.record_panel.free_btn.setEnabled(True)
+        else:
+            # Disconnected state
+            self.disc_act.setEnabled(False)
+            self.off_act.setEnabled(False)
+            self.vib_act.setEnabled(False)
+            self.pause_act.setEnabled(False)
+            self.scan_act.setEnabled(True)
+            self.record_panel.timer_btn.setEnabled(False)
+            self.record_panel.free_btn.setEnabled(False)
+            
+        # Force UI update
+        from PySide6.QtWidgets import QApplication
+        QApplication.processEvents()
+        
+    def _update_ui_connection_state(self, connected, reason):
+        """Update UI based on connection state change.
+        
+        This is called by _on_connection_changed via Qt's invokeMethod
+        to ensure UI updates happen on the main thread.
+        """
+        print(f"[MainWindow] Updating UI connection state: connected={connected}, reason={reason}")
+        print(f"[MainWindow] Current status: '{self.status_lbl.text()}'")
+        
+        # First ensure button states are consistent with connection state
+        # This is redundant with the earlier call in _on_connection_changed but provides extra safety
+        self._set_ui_connected_state(connected)
+        
+        if connected:
+            # Always print a clear message to help with debugging
+            print(f"[MainWindow] Device connected! Updating status from '{self.status_lbl.text()}' to 'Connected'")
+            
+            # Cancel any ongoing scan/connect task since we're now connected
+            if self._scanning:
+                self._scanning = False
+                if self._scan_connect_task and not self._scan_connect_task.done():
+                    print("[MainWindow] Cancelling scan task as connection was established")
+                    self._scan_connect_task.cancel()
+                    self._scan_connect_task = None
+            
+            # Force status update - always update when connected regardless of current text
+            # This is important to ensure UI shows connected state no matter what
+            if self.status_lbl.text() in ["Connection timed out", "Operation Cancelled"]:
+                self.status_lbl.setText("Connected (succeeded after timeout)")
+            else:
+                self.status_lbl.setText("Connected - Streaming data")
+            
+            # Update with more detailed info after a short delay
+            QTimer.singleShot(500, self._update_mode_status)
+        else:
+            # Device is disconnected - update UI accordingly
+            print(f"[MainWindow] Device disconnected! Updating status from '{self.status_lbl.text()}' to 'Disconnected'")
+            
+            # Reset pause state if active
+            if self._paused:
+                self._paused = False
+                self.pause_act.setText("Pause Stream")
+            
+            # Always update the status label, including if it was "Disconnecting..."
+            if self.status_lbl.text() in ["Disconnecting…", "Connecting…"]:
+                self.status_lbl.setText("Disconnected")
+            else:
+                # Update status message based on reason
+                if reason == "unexpected_disconnect":
+                    self.status_lbl.setText("Device disconnected unexpectedly")
+                else:
+                    self.status_lbl.setText("Disconnected")
+            
+            # Clear scanning flag in case disconnect happened during scan
+            self._scanning = False
+
+    # ------------- connection status checker -------------------------
+    def _check_connection_status(self):
+        """Check the connection status and data flow periodically and update the UI accordingly.
+        
+        This is a direct way to fix UI state regardless of race conditions in the connection process.
+        - The key insight is to check for actual data flowing (IMU or battery updates) rather than
+          just the myo.connected flag.
+        - This solves the problem with disconnect being called first during connection attempts.
+        """
+        current_status = self.status_lbl.text()
+        
+        # Check if we're actually receiving data (battery or IMU data)
+        data_flowing = (self.myo.battery is not None) or (len(self._frame_q) > 0)
+        
+        # Track when we last saw "Disconnecting..." status
+        if current_status == "Disconnecting…":
+            if not hasattr(self, "_disconnecting_start_time"):
+                self._disconnecting_start_time = time.time()
+            # Allow a grace period for disconnection (2 seconds)
+            elif time.time() - self._disconnecting_start_time > 2.0:
+                # It's been stuck on "Disconnecting..." for too long, force an update
+                if not self.myo.connected and not data_flowing:
+                    self.status_lbl.setText("Disconnected")
+                    print("[MainWindow] Status fix: UI was stuck on 'Disconnecting...' - forced update.")
+                    # Reset the timer
+                    delattr(self, "_disconnecting_start_time")
+                    return
+        else:
+            # Not disconnecting, clear the timer if it exists
+            if hasattr(self, "_disconnecting_start_time"):
+                delattr(self, "_disconnecting_start_time")
+        
+        # Don't interfere with active operations
+        if current_status in ["Turning off…", "Scanning…"]:
+            return
+        
+        # Data is flowing, ensure UI shows connected
+        if data_flowing and self.myo.connected:
+            # Verify button states regardless of current status text
+            # This addresses cases where the status text is correct but buttons are wrong
+            buttons_inconsistent = (
+                not self.disc_act.isEnabled() or
+                not self.off_act.isEnabled() or
+                not self.vib_act.isEnabled() or
+                not self.pause_act.isEnabled() or
+                self.scan_act.isEnabled() or
+                not self.record_panel.timer_btn.isEnabled() or
+                not self.record_panel.free_btn.isEnabled()
+            )
+            
+            if buttons_inconsistent:
+                print("[MainWindow] Button state inconsistency detected - fixing UI controls")
+                # Fix button states
+                self.disc_act.setEnabled(True)
+                self.off_act.setEnabled(True)
+                self.vib_act.setEnabled(True)
+                self.pause_act.setEnabled(True)
+                self.scan_act.setEnabled(False)
+                self.record_panel.timer_btn.setEnabled(True) 
+                self.record_panel.free_btn.setEnabled(True)
+                # Force UI update
+                from PySide6.QtWidgets import QApplication
+                QApplication.processEvents()
+            
+            # Also check if status text needs updating
+            if current_status in ["Connection attempt cancelled - still waiting for device", 
+                              "Connecting…", "Disconnected", "Operation Cancelled",
+                              "Connection timed out - waiting for device (may still connect)"]:
+                print(f"[MainWindow] Status fix: UI shows '{current_status}' but data is flowing. Fixing.")
+                self.status_lbl.setText("Connected - Streaming data")
+                
+                # Ensure buttons are enabled (redundant with above but keeping for clarity)
+                self.disc_act.setEnabled(True)
+                self.off_act.setEnabled(True)
+                self.vib_act.setEnabled(True)
+                self.pause_act.setEnabled(True)
+                self.scan_act.setEnabled(False)
+                self.record_panel.timer_btn.setEnabled(True) 
+                self.record_panel.free_btn.setEnabled(True)
+                
+                # Clear any lingering scan task
+                if self._scanning:
+                    self._scanning = False
+                    if self._scan_connect_task and not self._scan_connect_task.done():
+                        self._scan_connect_task.cancel()
+                        self._scan_connect_task = None
+        
+        # No data flowing and not connected, ensure UI shows disconnected
+        elif not data_flowing and not self.myo.connected:
+            if "Connected" in current_status or "Streaming" in current_status:
+                print(f"[MainWindow] Status fix: UI shows '{current_status}' but no data flowing and disconnected. Fixing.")
+                self.status_lbl.setText("Disconnected")
+                
+                # Also update UI elements
+                self.disc_act.setEnabled(False)
+                self.off_act.setEnabled(False)
+                self.vib_act.setEnabled(False)
+                self.pause_act.setEnabled(False)
+                self.scan_act.setEnabled(True)
+                self.record_panel.timer_btn.setEnabled(False)
+                self.record_panel.free_btn.setEnabled(False)
