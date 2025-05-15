@@ -8,7 +8,7 @@ import asyncio, numpy as np
 from collections import deque
 import time
 
-from .plots import _Ring, EMGGrid, EMGComposite
+from .plots import _Ring, EMGGrid, EMGComposite, DEFAULT_SAMPLES
 from .recording import RecordingPanel
 from .imu_viz import MatplotlibIMUCube
 # Delay importing VisionRecordingWidget for better startup performance
@@ -36,6 +36,11 @@ class MainWindow(QMainWindow):
         # Register connection callback to handle connection state changes from MyoManager
         self.myo.set_connection_callback(self._on_connection_changed)
 
+        # Performance settings
+        self._buffer_size = DEFAULT_SAMPLES
+        self._refresh_interval = FRAME_UPDATE_INTERVAL
+        self._downsample_ratio = 4
+        
         # ── top toolbar ────────────────────────────────────────────────
         tb = QToolBar()
         self.addToolBar(tb)
@@ -170,6 +175,87 @@ class MainWindow(QMainWindow):
                     QTimer.singleShot(300, lambda: self.status_lbl.setText("IMU mode update failed"))
         imu_group.triggered.connect(_set_imu_mode)
 
+        # NEW: Performance Settings sub-menu
+        perf_menu = opt_menu.addMenu("Performance Settings")
+        
+        # Buffer Size submenu
+        buffer_menu = perf_menu.addMenu("Buffer Size")
+        buffer_group = QActionGroup(self); buffer_group.setExclusive(True)
+        
+        buffer_sizes = [200, 500, 1000]
+        buffer_actions = []
+        
+        for size in buffer_sizes:
+            act = QAction(f"{size} samples", self, checkable=True)
+            if size == DEFAULT_SAMPLES:
+                act.setChecked(True)
+            buffer_group.addAction(act)
+            buffer_menu.addAction(act)
+            buffer_actions.append((size, act))
+            
+        def _set_buffer_size(act):
+            for size, action in buffer_actions:
+                if action is act:
+                    self._buffer_size = size
+                    self._ring.resize(size)
+                    self.grid_view.update_buffer_size(size)
+                    self.comp_view.update_buffer_size(size)
+                    break
+                    
+        buffer_group.triggered.connect(_set_buffer_size)
+        
+        # Refresh Interval submenu
+        refresh_menu = perf_menu.addMenu("Refresh Interval")
+        refresh_group = QActionGroup(self); refresh_group.setExclusive(True)
+        
+        refresh_intervals = [50, 100, 200, 500]
+        refresh_actions = []
+        
+        for interval in refresh_intervals:
+            act = QAction(f"{interval} ms", self, checkable=True)
+            if interval == FRAME_UPDATE_INTERVAL:
+                act.setChecked(True)
+            refresh_group.addAction(act)
+            refresh_menu.addAction(act)
+            refresh_actions.append((interval, act))
+            
+        self._refresh_timer = None  # Will be initialized later
+            
+        def _set_refresh_interval(act):
+            for interval, action in refresh_actions:
+                if action is act:
+                    self._refresh_interval = interval
+                    if self._refresh_timer:
+                        self._refresh_timer.setInterval(interval)
+                    break
+                    
+        refresh_group.triggered.connect(_set_refresh_interval)
+        
+        # Downsample Ratio submenu
+        downsample_menu = perf_menu.addMenu("Downsample Ratio")
+        downsample_group = QActionGroup(self); downsample_group.setExclusive(True)
+        
+        downsample_ratios = [1, 2, 4, 8, 16]
+        downsample_actions = []
+        
+        for ratio in downsample_ratios:
+            act = QAction(f"1:{ratio}" if ratio > 1 else "None", self, checkable=True)
+            if ratio == 4:  # Default is 1:4
+                act.setChecked(True)
+            downsample_group.addAction(act)
+            downsample_menu.addAction(act)
+            downsample_actions.append((ratio, act))
+            
+        def _set_downsample_ratio(act):
+            for ratio, action in downsample_actions:
+                if action is act:
+                    self._downsample_ratio = ratio
+                    self.grid_view.set_downsample(ratio)
+                    self.comp_view.set_downsample(ratio)
+                    break
+                    
+        downsample_group.triggered.connect(_set_downsample_ratio)
+
         #  Camera Settings sub-menu
         cam_menu = opt_menu.addMenu("Camera Settings")
         cam_menu.setObjectName("cam_menu")  # Set object name for later lookup
@@ -195,7 +281,7 @@ class MainWindow(QMainWindow):
                     if hasattr(self, "vision_recording") and self.vision_recording:
                         self.vision_recording.camera_manager.set_camera(cam["id"])
                     break
-        
+                    
         cam_group.triggered.connect(_set_camera)
         
         # Resolution sub-menu
@@ -297,7 +383,8 @@ class MainWindow(QMainWindow):
         self.batt_lbl   = QLabel("Battery: -- %"); sb.addPermanentWidget(self.batt_lbl)
 
         # ── timers ────────────────────────────────────────────────────
-        QTimer(self, interval=FRAME_UPDATE_INTERVAL, timeout=self._refresh_plots).start()
+        self._refresh_timer = QTimer(self, interval=self._refresh_interval, timeout=self._refresh_plots)
+        self._refresh_timer.start()
         QTimer(self, interval=BATTERY_CHECK_INTERVAL, timeout=self._query_battery).start()
         
         # Add a connection status checker timer - runs every 500ms to ensure UI is accurate
