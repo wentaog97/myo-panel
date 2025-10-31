@@ -227,7 +227,15 @@ class MyoManager:
                     await self._disconnect()
                     return
 
-                self._client = BleakClient(addr)
+                callback_bound = False
+                try:
+                    # Bleak 0.22+ expects the disconnect callback at construction time
+                    self._client = BleakClient(addr, disconnected_callback=self._on_ble_disconnect)
+                    callback_bound = True
+                except TypeError:
+                    # Older Bleak releases do not accept the keyword argument
+                    self._client = BleakClient(addr)
+
                 # Add a timeout to the connect call (e.g., 15 seconds)
                 try:
                     # Explicit timeout for the connect call
@@ -248,8 +256,13 @@ class MyoManager:
                         await self._disconnect()
                         raise
 
-                # Set disconnect callback
-                self._client.set_disconnected_callback(self._on_ble_disconnect)
+                # Bind disconnect callback for legacy Bleak versions
+                if not callback_bound:
+                    set_cb = getattr(self._client, "set_disconnected_callback", None)
+                    if callable(set_cb):
+                        set_cb(self._on_ble_disconnect)
+                    else:
+                        print("[MyoManager] Warning: bleak client lacks disconnect callback support.")
 
                 # Check if shutting down before proceeding with post-connection setup
                 if self._shutting_down:
