@@ -29,7 +29,24 @@ A PySide6 application for interfacing with the Thalmic MYO armband. Visualize an
    git clone https://github.com/yourusername/myo-panel.git
    cd myo-panel
    ```
-3. cd into the directory 
+3. cd into the directory
+   
+5. Recommended to create venv with
+```bash
+python -m venv venv 
+```
+
+If you are on windows, use:
+```bash
+.\venv\Scripts\activate.bat
+```
+
+If you are on MacOS, use:
+```bash
+source venv/bin/activate
+```
+
+5. Install requirements and app
 ### Development Installation
 For development work where you need to modify the code:
 ```bash
